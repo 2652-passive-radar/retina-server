@@ -1344,6 +1344,14 @@ function AircraftMapScope({ mode, ownerOnly, restoreSelection, auth, onOwnerChan
   // disc is the honest reading of a solved position, and hiding it by default
   // would leave the icon looking more precise than it is.
   const [showUncertainty, setShowUncertainty] = useMapPreference("layer.uncertainty", initialLayers?.uncertainty ?? true);
+  // Raw view: the ADS-B truth, every node's delay arcs, and the solves the
+  // server made from radar alone (multi-node, no transponder help). Truth and
+  // arcs are drawn whatever their own toggles say; ADS-B-assisted and
+  // single-node tracks, uncertainty discs, trails, anomaly rings and
+  // truth-vs-solve error lines are hidden. Dark truth is left out: a real
+  // ADS-B feed would not have it.
+  const [rawView, setRawView] = useMapPreference("layer.rawView", false);
+  const arcsShown = showArcs || rawView;
   const [showShortcutHelp, setShowShortcutHelp] = useState(false);
   // Enthusiast filters: altitude band (FL, hundreds of ft), speed floor, type.
   const [filters, setFilters] = useMapPreference("filters", { minFl: "", maxFl: "", minGs: "", type: "all" });
@@ -1769,8 +1777,11 @@ function AircraftMapScope({ mode, ownerOnly, restoreSelection, auth, onOwnerChan
   //  1. All truth aircraft appear IMMEDIATELY on toggle (no blank-until-pan).
   //  2. Every pan no longer re-triggers this memo + GroundTruthCanvasLayer.useEffect.
   const visibleTruthOnlyAircraft = useMemo(
-    () => showGroundTruth ? truthOnlyAircraft : [],
-    [showGroundTruth, truthOnlyAircraft],
+    () => {
+      if (rawView) return truthAvailable ? truthOnlyAircraft.filter((ac) => ac.has_adsb) : [];
+      return showGroundTruth ? truthOnlyAircraft : [];
+    },
+    [rawView, truthAvailable, showGroundTruth, truthOnlyAircraft],
   );
 
   const visibleNodes = useMemo(
@@ -2113,6 +2124,7 @@ function AircraftMapScope({ mode, ownerOnly, restoreSelection, auth, onOwnerChan
         showInBeamDiag={showInBeamDiag}
         showArcs={showArcs}
         showUncertainty={showUncertainty}
+        rawView={rawView}
         soundOn={soundOn}
         tileTheme={tileTheme}
         hasUserLoc={!!userLoc}
@@ -2130,6 +2142,7 @@ function AircraftMapScope({ mode, ownerOnly, restoreSelection, auth, onOwnerChan
         onToggleInBeamDiag={() => setShowInBeamDiag((v) => !v)}
         onToggleArcs={() => setShowArcs((v) => !v)}
         onToggleUncertainty={() => setShowUncertainty((v) => !v)}
+        onToggleRawView={() => setRawView((v) => !v)}
         onToggleSound={() => setSoundOn((v) => !v)}
         onCycleTheme={cycleBasemap}
         onShare={shareLink}
@@ -2185,6 +2198,7 @@ function AircraftMapScope({ mode, ownerOnly, restoreSelection, auth, onOwnerChan
             truthClasses={truthClassesPresent}
             showIlluminators={showIlluminators}
             hasPlayback={paused && historyRef.current.length > 0}
+            rawView={rawView}
           />
           <MapContainer
             center={[initialHash.lat ?? 34.85, initialHash.lon ?? -82.39]}
@@ -2436,7 +2450,7 @@ function AircraftMapScope({ mode, ownerOnly, restoreSelection, auth, onOwnerChan
                  layer that subscribes to frontendTrailsRef.  Excludes the
                  selected aircraft, which gets the prominent gradient trail
                  rendered below from the same buffer source. */}
-            {showTrails && (
+            {showTrails && !rawView && (
               <AircraftTrailsLayer
                 visibleAircraftRef={visibleAircraftRef}
                 frontendTrailsRef={frontendTrailsRef}
@@ -2447,7 +2461,7 @@ function AircraftMapScope({ mode, ownerOnly, restoreSelection, auth, onOwnerChan
             )}
 
             {/* 68% position-uncertainty disc around each multi-node solve. */}
-            {showUncertainty && (
+            {showUncertainty && !rawView && (
               <SolveUncertaintyLayer visibleAircraftRef={visibleAircraftRef} colorByAlt={colorByAlt} selectedHexRef={selectedHexRef} />
             )}
 
@@ -2490,14 +2504,14 @@ function AircraftMapScope({ mode, ownerOnly, restoreSelection, auth, onOwnerChan
             )}
 
             {/* Detection arcs — imperative Leaflet layer, 4Hz opacity fade, sourced from raw WS buffer */}
-            {showArcs && (
+            {arcsShown && (
               <DetectionArcs arcsBufferRef={arcsBufferRef} selectedHex={selectedHex} onSelect={handleSelectAircraft} onSelectNode={handleSelectNode} nodesByRefRef={nodesByRefRef} />
             )}
             {/* Claimed single-node ADS-B arcs — a screen-length section of the
                  claiming node's locus, drawn under the plane icon. Shares the
                  showArcs toggle: both answer "where does this node's delay
                  measurement put the target". */}
-            {showArcs && (
+            {showArcs && !rawView && (
               <ClaimedArcs aircraftRef={visibleAircraftRef} onSelect={handleSelectAircraft} />
             )}
             {/* In-beam-no-detection diagnostic — red dashed lines from a node's RX to any
@@ -2531,6 +2545,7 @@ function AircraftMapScope({ mode, ownerOnly, restoreSelection, auth, onOwnerChan
                  everywhere else, so the next real solve restores the solid icon. */}
             {visibleAircraft.map((ac) => {
               if (!validLatLon(ac.lat, ac.lon)) return null;
+              if (rawView && !(ac.multinode && !ac.adsb_assisted)) return null;
               if (ac.position_source === POSITION_SOURCE_ARC_ONLY) return null;
               if (ac.position_source === "solver_single_node") return null;
               const isSelected = ac.hex === selectedHex;
@@ -2553,7 +2568,7 @@ function AircraftMapScope({ mode, ownerOnly, restoreSelection, auth, onOwnerChan
             {/* Anomaly flag rings — pulsing red circle around flagged aircraft.
                  Follows the icon's drift gate: a ring with no plane inside it
                  reads as a phantom target. */}
-            {visibleAircraft
+            {!rawView && visibleAircraft
               .filter((ac) =>
                 anomalyHexesRef.current.has(ac.ground_truth_hex || ac.hex) &&
                 ac.lat && ac.lon &&
@@ -2578,7 +2593,7 @@ function AircraftMapScope({ mode, ownerOnly, restoreSelection, auth, onOwnerChan
               ))}
 
             {/* Ground-truth-only markers — single canvas layer, O(1) DOM regardless of count */}
-            {showGroundTruth && (
+            {(showGroundTruth || rawView) && (
               <GroundTruthCanvasLayer
                 aircraft={visibleTruthOnlyAircraft}
                 onSelect={handleSelectAircraft}
@@ -2587,7 +2602,7 @@ function AircraftMapScope({ mode, ownerOnly, restoreSelection, auth, onOwnerChan
             )}
 
             {/* Matched GT overlay — shows GT dots + error lines for radar aircraft with GT match */}
-            {showGroundTruth && (
+            {showGroundTruth && !rawView && (
               <MatchedGroundTruthLayer
                 radarAircraftRef={radarAircraftRef}
                 groundTruthRef={groundTruthRef}
@@ -2601,7 +2616,7 @@ function AircraftMapScope({ mode, ownerOnly, restoreSelection, auth, onOwnerChan
                 /api/test/mlat-verification and draws truth-vs-solver error
                 lines, which mean nothing without truth. Truth exists only on a
                 synthetic feed, so the public /map never makes the request. */}
-            {showGroundTruth && (
+            {showGroundTruth && !rawView && (
               <MlatVerificationLayer
                 groundTruthRef={groundTruthRef}
                 smoothRef={smoothRef}

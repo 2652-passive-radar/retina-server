@@ -13,7 +13,7 @@ const NO_TRUTH_CLASSES: ReadonlySet<string> = new Set();
  * picture, not part of the chrome, so it now sits on the map and collapses to
  * its header for anyone who has learnt the colours.
  */
-export default function MapLegend({ colorByAlt, showGroundTruth, truthClasses = NO_TRUTH_CLASSES, showIlluminators, hasPlayback }) {
+export default function MapLegend({ colorByAlt, showGroundTruth, truthClasses = NO_TRUTH_CLASSES, showIlluminators, hasPlayback, rawView = false }) {
   const palette = usePalette();
   const { ILLUMINATOR, LANE_MN_ADSB, LANE_MN_DARK, LANE_SOLVER_SEED, NODE } = palette;
   const [open, setOpen] = useMapPreference("legendOpen", true);
@@ -32,7 +32,15 @@ export default function MapLegend({ colorByAlt, showGroundTruth, truthClasses = 
 
       {open && (
         <div className="map-legend-body">
-          {colorByAlt ? (
+          {rawView ? (
+            // Raw view draws only these: radar-only solves, ADS-B truth, arcs.
+            <>
+              <LegendItem color={LANE_MN_DARK} label="Radar-only solve" />
+              {truthLegend(palette).filter((t) => t.cls === "sim_adsb" && truthClasses.has(t.cls)).map((t) => (
+                <LegendItem key={t.cls} color={t.color} label="ADS-B truth" />
+              ))}
+            </>
+          ) : colorByAlt ? (
             altitudeLegend().map(([c, lbl]) => <LegendItem key={lbl} color={c} label={lbl} />)
           ) : (
             <>

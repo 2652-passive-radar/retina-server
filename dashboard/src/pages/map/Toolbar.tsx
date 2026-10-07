@@ -35,6 +35,7 @@ export default function Toolbar({
   showInBeamDiag,
   showArcs,
   showUncertainty,
+  rawView,
   soundOn,
   tileTheme,
   hasUserLoc,
@@ -54,6 +55,7 @@ export default function Toolbar({
   onToggleInBeamDiag,
   onToggleArcs,
   onToggleUncertainty,
+  onToggleRawView,
   onToggleSound,
   onCycleTheme,
   onShare,
@@ -251,6 +253,16 @@ export default function Toolbar({
 
         <div className="toolbar-group">
           <span className="toolbar-group-label">View</span>
+          {truthAvailable && (
+            <button
+              className="btn btn-secondary toggle-btn"
+              aria-pressed={rawView}
+              onClick={onToggleRawView}
+              title="Show only ADS-B truth, each node's delay arcs and radar-only solves"
+            >
+              Raw
+            </button>
+          )}
           <button className="btn btn-secondary toggle-btn" aria-pressed={followSelected} onClick={onToggleFollow}>
             Follow
           </button>
