@@ -235,3 +235,7 @@ dark_follow_inelig_min_nodes
 # by the middleware stack. Neither has a call site in our code.
 model_config
 _.dispatch
+
+# services/aircraft_db.py: sqlite3 reads a connection's row_factory itself when
+# building each row, which is what lets dict(row) name the columns.
+_.row_factory

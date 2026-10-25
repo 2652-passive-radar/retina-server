@@ -174,6 +174,26 @@ def _isolate_state_snapshot(tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_aircraft_db(tmp_path):
+    """Point the aircraft registry at an empty per-test path.
+
+    A developer who has run scripts/fetch_aircraft_db.py has a real registry in
+    backend/data, and every feed test would then label its made-up hexes as
+    whatever real aircraft owns them, overriding the target_class it asserts.
+    Restored by hand rather than through monkeypatch: an autouse fixture taking
+    monkeypatch would make every test's own patches outlive its other fixtures'
+    teardown.
+    """
+    orig = os.environ.get("AIRCRAFT_DB_PATH")
+    os.environ["AIRCRAFT_DB_PATH"] = str(tmp_path / "aircraft_db.sqlite")
+    yield
+    if orig is None:
+        os.environ.pop("AIRCRAFT_DB_PATH", None)
+    else:
+        os.environ["AIRCRAFT_DB_PATH"] = orig
+
+
+@pytest.fixture(autouse=True)
 def _reset_module_state():
     """Reset every module-level mutable store before each test.
 
@@ -186,6 +206,7 @@ def _reset_module_state():
     from core import state
     from routes import admin
     from services import (
+        aircraft_db,
         aircraft_feed,
         alerting,
         dark_follow,
@@ -197,6 +218,7 @@ def _reset_module_state():
         node_refs,
         probation,
         publication,
+        target_classification,
         tcp_handler,
         track_gates,
     )
@@ -222,6 +244,8 @@ def _reset_module_state():
         infrastructure,
         periodic,
         admin,
+        aircraft_db,
+        target_classification,
     ):
         mod._reset_for_tests()
     yield

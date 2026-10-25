@@ -644,6 +644,10 @@ async def _fetch_adsb_lol(regions: list[Region]) -> tuple[dict, set[str]]:
                 "last_seen_ms": _capture_ms(captured, poll_ts),
                 "source": "adsb_lol",
             }
+            # The emitter category labels a target the aircraft registry does
+            # not know (services.target_identity); nothing else reads it.
+            if ac.get("category"):
+                result[h]["category"] = ac["category"]
         return result, covered
 
 

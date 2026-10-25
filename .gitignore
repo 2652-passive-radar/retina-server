@@ -37,6 +37,9 @@ backend/data/*.json.migrated
 backend/data/users.db
 backend/data/users.db-shm
 backend/data/users.db-wal
+# Built by services/aircraft_db.py from the tar1090-db export.
+backend/data/aircraft_db.sqlite
+backend/data/.aircraft_db.*
 .vscode/*
 .claude/*
 skills-lock.json

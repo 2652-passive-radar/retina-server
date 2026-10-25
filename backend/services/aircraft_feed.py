@@ -42,6 +42,7 @@ from services.id_utils import (
 from services.known_claiming import KNOWN_CLAIM_MAX_FIX_AGE_S
 from services.public_location import fuzz_node_cfg
 from services.solve_uncertainty import solve_sigma_m, velocity_sigma_ms
+from services.target_classification import classify_feed
 from services.track_gates import (
     _build_single_node_arc,
     _public_arc_cache,
@@ -628,6 +629,9 @@ def build_combined_aircraft_json(default_pipeline: PassiveRadarPipeline) -> dict
     # three sections have appended, so a multinode solve can displace a
     # single-node arc that was appended before it.
     aircraft = dedup_aircraft(aircraft)
+    # Last, so only the entries that survive are classified: what each target
+    # is, by its hex where a transponder names it and by its motion always.
+    aircraft = classify_feed(aircraft, now)
 
     return {
         "now": now,
