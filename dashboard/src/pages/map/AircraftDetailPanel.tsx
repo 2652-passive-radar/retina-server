@@ -7,6 +7,16 @@ import { M_PER_FT, KNOTS_PER_MS, MS_PER_KNOT } from "./units";
 import { solveUncertaintyRadiusM, solveUncertaintyRadius95M } from "./uncertainty";
 import { usePalette } from "./useMapTheme";
 
+const TARGET_CLASS_LABELS: Record<string, string> = {
+  fast_fixed_wing: "Fast fixed wing",
+  light_fixed_wing: "Light fixed wing",
+  rotorcraft: "Rotorcraft",
+  glider: "Glider",
+  balloon: "Balloon / airship",
+  drone: "Drone",
+  surface: "Surface vehicle",
+};
+
 /**
  * `nodeLabelFor` maps a node ref to the handle the map is allowed to print
  * (map/nodeSites.ts).  Refs are the join key everywhere — `ac.node_ref`,
@@ -146,6 +156,28 @@ export default function AircraftDetailPanel({ ac, onClose, groundTruth, trails, 
                     <span style={{ color: isDrone ? DRONE : LANE_MN_ADSB, fontWeight: 600 }}>
                       {isDrone ? "\u{1F6F8} Drone" : "\u2708\uFE0F Aircraft"}
                     </span>
+                  }
+                />
+              )}
+              {/* What the hex names (registry or ADS-B category), then what
+                  the motion-only baseline makes of the same target. */}
+              {ac.identity?.registration && <Field label="Registration" value={ac.identity.registration} />}
+              {(ac.identity?.type_name || ac.identity?.type_code) && (
+                <Field
+                  label="Type"
+                  value={[ac.identity.type_name, ac.identity.type_code && `(${ac.identity.type_code})`].filter(Boolean).join(" ")}
+                />
+              )}
+              {ac.identity?.operator && <Field label="Operator" value={ac.identity.operator} />}
+              {ac.identity?.class && <Field label="Class" value={TARGET_CLASS_LABELS[ac.identity.class] ?? ac.identity.class} />}
+              {ac.identity?.military && <Field label="Military" value="Yes" />}
+              {ac.motion_class && (
+                <Field
+                  label="Motion class"
+                  value={
+                    ac.motion_class.class === "unknown"
+                      ? "Undecided"
+                      : `${TARGET_CLASS_LABELS[ac.motion_class.class] ?? ac.motion_class.class} (${Math.round(ac.motion_class.confidence * 100)}%)`
                   }
                 />
               )}

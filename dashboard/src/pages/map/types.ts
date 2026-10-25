@@ -19,6 +19,10 @@ export interface Aircraft {
   type?: string;
   node_ref?: string;
   target_class?: string;
+  /** What the ICAO hex names: backend services/target_identity.py. */
+  identity?: TargetIdentity;
+  /** The motion-only baseline's verdict: backend services/motion_classifier.py. */
+  motion_class?: MotionClass;
   object_type?: string;
   position_source?: string;
   doppler_hz?: number;
@@ -78,6 +82,40 @@ export interface Aircraft {
   speed_ms?: number;
   heading?: number;
   geolocation_method?: string;
+}
+
+export type TargetClassName =
+  | "fast_fixed_wing"
+  | "light_fixed_wing"
+  | "rotorcraft"
+  | "glider"
+  | "balloon"
+  | "drone"
+  | "surface";
+
+/**
+ * A transponder's airframe, looked up by hex in the aircraft registry, or
+ * read off its ADS-B emitter category where the registry does not know it.
+ */
+export interface TargetIdentity {
+  source: "aircraft_db" | "adsb_category";
+  class: TargetClassName | null;
+  military: boolean;
+  registration?: string;
+  type_code?: string;
+  type_name?: string;
+  description?: string;
+  icao_class?: string;
+  wtc?: string;
+  operator?: string;
+  category?: string;
+}
+
+export interface MotionClass {
+  class: Exclude<TargetClassName, "surface"> | "unknown";
+  confidence: number;
+  scores: Record<string, number>;
+  features: Record<string, number>;
 }
 
 /** Trail / recent-position tuple: [lat, lon, alt, ts] */

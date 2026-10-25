@@ -1174,6 +1174,10 @@ solver_fail_displacement_dark: int = 0
 # tracks anomalous — but a rising rate here still means association regressed.
 position_jump_events: int = 0
 
+# Feed entries services.target_classification failed to classify, which are
+# published without its fields rather than taking the broadcast down.
+target_classification_errors: int = 0
+
 # Sim ADS-B pushes dropped for a non-transponder hex (e.g. a simulator object
 # id standing in for a transponder).  A nonzero value means an outdated fleet
 # is still pushing dark aircraft into the ADS-B path — see routes/sim_ingest.

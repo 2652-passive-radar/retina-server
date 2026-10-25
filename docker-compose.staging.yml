@@ -58,6 +58,10 @@ services:
       # it; see docker-compose.prod.yml.
       - ADSB_FALLBACK_ENABLED=1
       - KNOWN_LANE_MODE=shadow
+      # Downloads the aircraft registry the feed labels targets from by hex
+      # (services/aircraft_db.py). Staging first; production once it is seen
+      # labelling correctly here.
+      - AIRCRAFT_DB_ENABLED=1
       # Labels alerts, and a variable of its own rather than a reading of
       # RETINA_ENV above: this box names itself `staging` in an alert while still
       # running the `test` guards. See services/alerting.py.

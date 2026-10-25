@@ -68,6 +68,7 @@ from services.state_snapshot import SAVE_INTERVAL_S, restore_snapshot, save_snap
 from services.tasks import (
     adsb_fallback_task,
     adsb_truth_fetcher,
+    aircraft_db_refresh_task,
     aircraft_flush_task,
     analytics_refresh_task,
     archive_flush_task,
@@ -259,6 +260,8 @@ async def lifespan(app: FastAPI):
                 adsb_truth_fetcher,
                 # Returns at once unless ADSB_FALLBACK_ENABLED=1.
                 adsb_fallback_task,
+                # Returns at once unless AIRCRAFT_DB_ENABLED=1.
+                aircraft_db_refresh_task,
                 feed_gc_task,
                 archive_flush_task,
                 track_flush_task,
