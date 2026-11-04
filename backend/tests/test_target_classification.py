@@ -12,13 +12,13 @@ import pytest
 from core import state
 from services import aircraft_db, motion_classifier, target_classification
 from services.target_identity import (
-    BALLOON,
+    BLADES,
     DRONE,
-    FAST_FIXED_WING,
-    GLIDER,
-    LIGHT_FIXED_WING,
-    ROTORCRAFT,
-    SURFACE,
+    HELICOPTER,
+    JET,
+    OTHER,
+    PISTON,
+    TURBOPROP,
     class_from_icao,
     identify,
     target_class_for,
@@ -34,6 +34,8 @@ AIRCRAFT_CSV = "\n".join(
         "A55555;N55555;C172;0001;;;Private Owner LLC;",
         "3D0001;D-1234;GLID;00;Glider;;;",
         "ADF7F0;;DRON;10;;;;",
+        "C0FFEE;C-FDHD;DH8D;00;DHC-8-402 Dash 8;;Porter;",
+        "A22222;N22222;R44;00;ROBINSON R44;;;",
         "000001;;;10;;;Miscode - VARIOUS;",
         "short;;;;",
     ]
@@ -46,13 +48,15 @@ TYPES = {
     "C208": ["CESSNA 208 Caravan", "L1T", "L"],
     "GLID": ["Glider", "L0-", "-"],
     "DRON": ["", "D0-", "-"],
+    "DH8D": ["DHC-8-400 Dash 8Q", "L2T", "M"],
+    "R44": ["ROBINSON R44", "H1P", "L"],
 }
 
 
 @pytest.fixture
 def registry():
     count = aircraft_db.build(AIRCRAFT_CSV, TYPES, aircraft_db.db_path())
-    assert count == 9
+    assert count == 11
     return aircraft_db.db_path()
 
 
@@ -100,46 +104,63 @@ class TestAircraftDb:
 
 class TestIdentity:
     @pytest.mark.parametrize(
-        "icao_class,wtc,expected",
+        "icao_class,expected",
         [
-            ("L2J", "M", FAST_FIXED_WING),
-            ("L1J", "L", FAST_FIXED_WING),
-            ("L2T", "M", FAST_FIXED_WING),
-            ("L1T", "L", LIGHT_FIXED_WING),
-            ("L1P", "L", LIGHT_FIXED_WING),
-            ("A1P", "L", LIGHT_FIXED_WING),
-            ("H1P", "L", ROTORCRAFT),
-            ("G1P", "L", ROTORCRAFT),
-            ("D0-", "-", DRONE),
-            ("B0-", "-", BALLOON),
-            ("V0-", "-", SURFACE),
-            ("L0-", "-", None),
-            ("", None, None),
-            (None, None, None),
+            ("L2J", JET),
+            ("L1J", JET),
+            ("S2J", JET),
+            ("L2T", TURBOPROP),
+            ("L1T", TURBOPROP),
+            ("A2T", TURBOPROP),
+            ("L1P", PISTON),
+            ("A1P", PISTON),
+            ("S1P", PISTON),
+            ("S1E", PISTON),
+            ("L1E", PISTON),
+            ("L0-", OTHER),
+            ("H1P", HELICOPTER),
+            ("H2T", HELICOPTER),
+            ("G1P", OTHER),
+            ("T2T", OTHER),
+            ("R1R", OTHER),
+            ("D0-", DRONE),
+            ("B0-", OTHER),
+            ("V0-", OTHER),
+            ("", None),
+            (None, None),
         ],
     )
-    def test_icao_class(self, icao_class, wtc, expected):
-        assert class_from_icao(icao_class, wtc) == expected
+    def test_icao_class(self, icao_class, expected):
+        assert class_from_icao(icao_class) == expected
 
     @pytest.mark.parametrize(
         "hex_code,cls",
         [
-            ("4ca1f2", FAST_FIXED_WING),
-            ("a12345", LIGHT_FIXED_WING),
-            ("ae1234", ROTORCRAFT),
-            ("400abc", FAST_FIXED_WING),
-            ("a99999", LIGHT_FIXED_WING),
-            ("3d0001", GLIDER),
+            ("4ca1f2", JET),
+            ("a12345", PISTON),
+            ("ae1234", HELICOPTER),
+            ("400abc", TURBOPROP),
+            ("a99999", TURBOPROP),
+            ("c0ffee", TURBOPROP),
+            ("a22222", HELICOPTER),
+            ("3d0001", OTHER),
             ("adf7f0", DRONE),
         ],
     )
     def test_registry_label(self, registry, hex_code, cls):
         assert identify(hex_code)["class"] == cls
 
+    def test_blades_come_from_the_type_table(self, registry):
+        assert identify("c0ffee")["blades"] == 6
+        assert identify("a12345")["blades"] == 2
+        assert identify("a22222")["blades"] == 2
+        assert "blades" not in identify("4ca1f2")
+        assert BLADES["DH8D"] == 6
+
     def test_label_names_the_airframe(self, registry):
         assert identify("ae1234") == {
             "source": "aircraft_db",
-            "class": ROTORCRAFT,
+            "class": HELICOPTER,
             "military": True,
             "type_code": "H60",
             "type_name": "SIKORSKY UH-60 Black Hawk",
@@ -151,7 +172,7 @@ class TestIdentity:
 
     def test_a_privacy_listed_aircraft_is_not_named(self, registry):
         label = identify("a55555")
-        assert label["class"] == LIGHT_FIXED_WING
+        assert label["class"] == PISTON
         assert label["privacy"] is True
         assert "registration" not in label and "operator" not in label
 
@@ -163,21 +184,28 @@ class TestIdentity:
         assert identify("abcdef") is None
         assert identify("abcdef", "A7") == {
             "source": "adsb_category",
-            "class": ROTORCRAFT,
+            "class": HELICOPTER,
             "category": "A7",
             "military": False,
         }
         assert identify("abcdef", "B6")["class"] == DRONE
-        assert identify("abcdef", "A0") is None
-        assert identify("abcdef", " a7 ")["class"] == ROTORCRAFT
+        assert identify("abcdef", "B4")["class"] == PISTON
+        for cat in ("B1", "B2", "B3", "B7", "C1", "C2", "C3"):
+            assert identify("abcdef", cat)["class"] == OTHER
+        assert identify("abcdef", " a7 ")["class"] == HELICOPTER
+
+    def test_weight_classes_say_nothing_about_the_engine(self, registry):
+        for cat in ("A0", "A1", "A2", "A3", "A4", "A5", "A6"):
+            assert identify("abcdef", cat) is None
 
     def test_registry_wins_over_the_category(self, registry):
-        assert identify("4ca1f2", "A1")["class"] == FAST_FIXED_WING
+        assert identify("4ca1f2", "A7")["class"] == JET
 
     def test_legacy_target_class(self):
         assert target_class_for(DRONE) == "drone"
-        assert target_class_for(ROTORCRAFT) == "aircraft"
-        assert target_class_for(SURFACE) is None
+        assert target_class_for(JET) == "aircraft"
+        assert target_class_for(HELICOPTER) == "aircraft"
+        assert target_class_for(OTHER) is None
         assert target_class_for(None) is None
 
 
@@ -217,33 +245,31 @@ def orbit_trail(speed_ms, radius_m, alt_m, n=25, dt=5.0, lat=51.5, lon=-0.1):
 class TestMotionBaseline:
     def test_airliner_in_the_cruise(self):
         m = motion_classifier.classify(straight_trail(230, 11_000))
-        assert m.cls == FAST_FIXED_WING
+        assert m.cls == JET
         assert m.confidence > 0.9
         assert m.features.speed_ms == pytest.approx(230, rel=0.02)
 
+    def test_a_dash_8_cruise_is_ambiguous_between_jet_and_turboprop(self):
+        m = motion_classifier.classify(straight_trail(150, 7_000))
+        assert m.scores[JET] > 0
+        assert m.scores[TURBOPROP] > 0
+        assert m.cls in (JET, TURBOPROP, motion_classifier.UNKNOWN)
+
     def test_light_aircraft_in_the_circuit(self):
         m = motion_classifier.classify(straight_trail(50, 800))
-        assert m.cls == LIGHT_FIXED_WING
+        assert m.cls == PISTON
 
-    def test_hovering_then_moving_is_a_rotorcraft(self):
+    def test_hovering_then_moving_is_a_helicopter(self):
         hover = [(1000.0 + i * 5, 51.5, -0.1, 300.0) for i in range(7)]
         move = [(p[0] + 35, p[1], p[2], p[3]) for p in straight_trail(40, 300, n=7)]
         m = motion_classifier.classify(hover + move)
         assert m.features.hover_fraction > 0.2
-        assert m.cls == ROTORCRAFT
+        assert m.cls == HELICOPTER
 
     def test_slow_low_and_turning_hard_is_a_drone(self):
         m = motion_classifier.classify(orbit_trail(12, 60, 120))
         assert m.features.turn_dps > 10
         assert m.cls == DRONE
-
-    def test_glider_thermalling(self):
-        m = motion_classifier.classify(orbit_trail(25, 100, 1500, n=31))
-        assert m.cls == GLIDER
-
-    def test_a_balloon_drifts(self):
-        m = motion_classifier.classify(straight_trail(8, 20_000, n=31))
-        assert m.cls == BALLOON
 
     def test_noise_inside_a_chord_does_not_read_as_speed(self):
         # Alternating 300 m of jitter on a stationary target: differencing
@@ -256,8 +282,9 @@ class TestMotionBaseline:
         floor = motion_classifier.doppler_speed_floor_ms(-150.0, 195e6)
         assert floor == pytest.approx(299_792_458 / 195e6 * 75, rel=1e-9)
         m = motion_classifier.classify(None, speed_floor_ms=floor)
-        assert m.cls == FAST_FIXED_WING
+        assert m.cls in (JET, TURBOPROP)
         assert m.scores[DRONE] == 0.0
+        assert m.scores[PISTON] == 0.0
 
     def test_a_small_doppler_decides_nothing(self):
         floor = motion_classifier.doppler_speed_floor_ms(2.0, 195e6)
@@ -276,7 +303,7 @@ class TestMotionBaseline:
 
     def test_a_reported_speed_stands_in_for_a_short_trail(self):
         m = motion_classifier.classify([(1000.0, 51.5, -0.1, 10_000.0)], speed_ms=240.0)
-        assert m.cls == FAST_FIXED_WING
+        assert m.cls == JET
 
     def test_climb_is_read_across_the_trail_not_chord_by_chord(self):
         pts = straight_trail(230, 11_000, n=25)
@@ -310,10 +337,10 @@ class TestFeed:
         target_classification.classify_feed([entry], now=2000.0)
         assert entry["identity"]["registration"] == "EI-DCL"
         assert entry["target_class"] == "aircraft"
-        assert entry["motion_class"]["class"] == FAST_FIXED_WING
+        assert entry["motion_class"]["class"] == JET
         card = target_classification.scorecard(now=2000.0)
         assert (card["targets"], card["decided"], card["accuracy"], card["coverage"]) == (1, 1, 1.0, 1.0)
-        assert card["confusion"][FAST_FIXED_WING][FAST_FIXED_WING] == 1
+        assert card["confusion"][JET][JET] == 1
 
     def test_a_drone_label_marks_the_target_a_drone(self, registry):
         entry = _feed_entry("adf7f0", orbit_trail(12, 60, 120), target_class="aircraft")
@@ -325,7 +352,7 @@ class TestFeed:
         target_classification.classify_entry(entry, now=2000.0)
         assert "identity" not in entry
         assert entry["target_class"] == "aircraft"
-        assert entry["motion_class"]["class"] == LIGHT_FIXED_WING
+        assert entry["motion_class"]["class"] == PISTON
         assert target_classification.scorecard(now=2000.0)["targets"] == 0
 
     def test_simulated_hexes_are_not_looked_up(self, registry):
@@ -338,7 +365,7 @@ class TestFeed:
         state.adsb_aircraft["abcdef"] = {"hex": "abcdef", "world": "real", "category": "A7"}
         entry = _feed_entry("abcdef", [])
         target_classification.classify_entry(entry, now=2000.0)
-        assert entry["identity"]["class"] == ROTORCRAFT
+        assert entry["identity"]["class"] == HELICOPTER
 
     def test_single_node_entries_use_the_doppler_floor(self):
         class _Pipeline:
@@ -353,7 +380,7 @@ class TestFeed:
         }
         target_classification.classify_entry(entry, now=2000.0)
         assert entry["motion_class"]["features"]["speed_floor_ms"] == pytest.approx(115.3, abs=0.1)
-        assert entry["motion_class"]["class"] == FAST_FIXED_WING
+        assert entry["motion_class"]["class"] in (JET, TURBOPROP)
 
     def test_a_claimed_adsb_entry_reads_its_own_speed_not_the_hex_trail(self):
         entry = _feed_entry("abc123", straight_trail(5, 100))
@@ -362,7 +389,7 @@ class TestFeed:
         features = entry["motion_class"]["features"]
         assert features["n_chords"] == 0
         assert features["speed_ms"] == pytest.approx(231.5, abs=0.1)
-        assert entry["motion_class"]["class"] == FAST_FIXED_WING
+        assert entry["motion_class"]["class"] == JET
 
     def test_an_arc_trail_is_not_read_as_motion(self):
         entry = _feed_entry("pr0002", straight_trail(230, 11_000))
@@ -389,17 +416,42 @@ class TestFeed:
 
     def test_scorecard_is_one_vote_per_aircraft_inside_the_window(self, registry):
         for t in (1000.0, 1001.0, 1002.0):
-            target_classification._record("4ca1f2", FAST_FIXED_WING, LIGHT_FIXED_WING, 0.5, t)
-        target_classification._record("a12345", LIGHT_FIXED_WING, LIGHT_FIXED_WING, 0.8, 1003.0)
-        target_classification._record("ae1234", ROTORCRAFT, motion_classifier.UNKNOWN, 0.2, 1004.0)
+            target_classification._record("4ca1f2", JET, PISTON, 0.5, t)
+        target_classification._record("a12345", PISTON, PISTON, 0.8, 1003.0)
+        target_classification._record("ae1234", HELICOPTER, motion_classifier.UNKNOWN, 0.2, 1004.0)
         card = target_classification.scorecard(now=1005.0)
         assert (card["targets"], card["decided"]) == (3, 2)
         assert card["accuracy"] == 0.5
         assert card["coverage"] == pytest.approx(0.667, abs=1e-3)
-        assert card["per_class"][LIGHT_FIXED_WING] == {"targets": 1, "recall": 1.0, "precision": 0.5}
-        assert card["per_class"][ROTORCRAFT]["recall"] is None
+        assert card["per_class"][PISTON] == {"targets": 1, "recall": 1.0, "precision": 0.5}
+        assert card["per_class"][HELICOPTER]["recall"] is None
         later = target_classification.scorecard(now=1003.5 + target_classification.SCORE_WINDOW_S)
         assert later["targets"] == 1
+
+    def test_scorecard_splits_by_altitude_band(self):
+        record = target_classification._record
+        record("a00001", JET, JET, 0.9, 1000.0, 11_000.0)
+        record("a00002", TURBOPROP, JET, 0.6, 1000.0, 7_000.0)
+        record("a00003", TURBOPROP, TURBOPROP, 0.6, 1000.0, 2_000.0)
+        record("a00004", PISTON, PISTON, 0.8, 1000.0, 300.0)
+        record("a00005", DRONE, motion_classifier.UNKNOWN, 0.2, 1000.0, 3_000.0)
+        record("a00006", JET, JET, 0.9, 1000.0, None)
+        bands = target_classification.scorecard(now=1001.0)["by_altitude"]
+        assert list(bands) == ["<1km", "1-3km", "3-6km", ">6km", "unknown"]
+        assert bands["<1km"]["targets"] == 1
+        assert bands["1-3km"]["confusion"][TURBOPROP][TURBOPROP] == 1
+        assert bands["3-6km"]["decided"] == 0 and bands["3-6km"]["accuracy"] is None
+        assert bands[">6km"]["confusion"][TURBOPROP][JET] == 1
+        assert (bands[">6km"]["targets"], bands[">6km"]["accuracy"]) == (2, 0.5)
+        assert bands["unknown"]["accuracy"] == 1.0
+        assert sum(b["targets"] for b in bands.values()) == 6
+
+    def test_a_target_labelled_other_is_not_scored(self, registry):
+        entry = _feed_entry("3d0001", straight_trail(25, 1500))
+        target_classification.classify_entry(entry, now=2000.0)
+        assert entry["identity"]["class"] == OTHER
+        assert "target_class" not in entry
+        assert target_classification.scorecard(now=2000.0)["targets"] == 0
 
     def test_empty_scorecard(self):
         card = target_classification.scorecard()

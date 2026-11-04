@@ -24,6 +24,7 @@ aircraft so a long-lived airliner does not outvote everything else.
 """
 
 import logging
+import math
 import threading
 import time
 from collections import OrderedDict
@@ -49,7 +50,20 @@ SCORE_WINDOW_S = 6 * 3600.0
 _SCORE_MAX_TARGETS = 20_000
 
 _score_lock = threading.Lock()
-_latest: "OrderedDict[str, tuple[str, str, float, float]]" = OrderedDict()
+_latest: "OrderedDict[str, tuple[str, str, float, float, float | None]]" = OrderedDict()
+
+# Altitude bands for the scorecard, upper bound exclusive, in metres.
+ALTITUDE_BANDS = (("<1km", 1_000.0), ("1-3km", 3_000.0), ("3-6km", 6_000.0), (">6km", math.inf))
+UNKNOWN_ALTITUDE = "unknown"
+
+
+def _altitude_band(alt_m: float | None) -> str:
+    if alt_m is None:
+        return UNKNOWN_ALTITUDE
+    for name, upper in ALTITUDE_BANDS:
+        if alt_m < upper:
+            return name
+    return ALTITUDE_BANDS[-1][0]
 
 
 def _alt_m(alt_ft) -> float | None:
@@ -124,10 +138,12 @@ def motion_for(entry: dict) -> motion_classifier.MotionClass:
     return motion_classifier.classify(None, speed_floor_ms=floor, alt_m=alt)
 
 
-def _record(hex_code: str, truth: str, predicted: str, confidence: float, now: float) -> None:
+def _record(
+    hex_code: str, truth: str, predicted: str, confidence: float, now: float, alt_m: float | None = None
+) -> None:
     with _score_lock:
         _latest.pop(hex_code, None)
-        _latest[hex_code] = (truth, predicted, confidence, now)
+        _latest[hex_code] = (truth, predicted, confidence, now, alt_m)
         cutoff = now - SCORE_WINDOW_S
         while _latest:
             oldest = next(iter(_latest.values()))
@@ -152,7 +168,7 @@ def classify_entry(entry: dict, now: float | None = None) -> dict:
         if legacy is not None:
             entry["target_class"] = legacy
         if identity.get("class") in TARGET_CLASSES:
-            _record(hex_code, identity["class"], motion.cls, motion.confidence, now)
+            _record(hex_code, identity["class"], motion.cls, motion.confidence, now, motion.features.alt_m)
     return entry
 
 
@@ -173,22 +189,41 @@ def classify_feed(aircraft: list[dict], now: float | None = None) -> list[dict]:
     return aircraft
 
 
+def _confusion(rows: list[tuple[str, str]]) -> dict:
+    """Confusion matrix plus headline numbers for ``(truth, predicted)`` pairs."""
+    labels = list(TARGET_CLASSES) + [motion_classifier.UNKNOWN]
+    confusion = {t: {p: 0 for p in labels} for t in TARGET_CLASSES}
+    for truth, predicted in rows:
+        confusion[truth][predicted if predicted in confusion[truth] else motion_classifier.UNKNOWN] += 1
+    decided = [(t, p) for t, p in rows if p != motion_classifier.UNKNOWN]
+    correct = sum(1 for t, p in decided if t == p)
+    return {
+        "targets": len(rows),
+        "decided": len(decided),
+        "accuracy": round(correct / len(decided), 3) if decided else None,
+        "coverage": round(len(decided) / len(rows), 3) if rows else None,
+        "confusion": confusion,
+    }
+
+
 def scorecard(now: float | None = None) -> dict:
     """The baseline against the hex label, one vote per aircraft.
 
     ``accuracy`` is over the targets the baseline committed on; ``coverage``
     is how many it committed on at all.  Both None with nothing to score.
+
+    ``by_altitude`` repeats the confusion matrix, with the same targets /
+    decided / accuracy, for each altitude band of the target's measured
+    altitude.  Its purpose is to show whether motion separates a jet from a
+    turboprop only at cruise: the two fly alike up high, and a turboprop's
+    lower ceiling and climb are all that tells them apart below it.
     """
     now = time.time() if now is None else now
     cutoff = now - SCORE_WINDOW_S
     with _score_lock:
         rows = [v for v in _latest.values() if v[3] >= cutoff]
-    labels = list(TARGET_CLASSES) + [motion_classifier.UNKNOWN]
-    confusion = {t: {p: 0 for p in labels} for t in TARGET_CLASSES}
-    for truth, predicted, _, _ in rows:
-        confusion[truth][predicted if predicted in confusion[truth] else motion_classifier.UNKNOWN] += 1
-    decided = [(t, p) for t, p, _, _ in rows if p != motion_classifier.UNKNOWN]
-    correct = sum(1 for t, p in decided if t == p)
+    overall = _confusion([(t, p) for t, p, _, _, _ in rows])
+    confusion = overall["confusion"]
     per_class = {}
     for cls in TARGET_CLASSES:
         n = sum(confusion[cls].values())
@@ -199,14 +234,19 @@ def scorecard(now: float | None = None) -> dict:
             "recall": round(confusion[cls][cls] / n_decided, 3) if n_decided else None,
             "precision": round(confusion[cls][cls] / predicted_as, 3) if predicted_as else None,
         }
+    by_altitude = {
+        band: _confusion([(t, p) for t, p, _, _, alt in rows if _altitude_band(alt) == band])
+        for band in [name for name, _ in ALTITUDE_BANDS] + [UNKNOWN_ALTITUDE]
+    }
     return {
         "window_s": SCORE_WINDOW_S,
-        "targets": len(rows),
-        "decided": len(decided),
-        "accuracy": round(correct / len(decided), 3) if decided else None,
-        "coverage": round(len(decided) / len(rows), 3) if rows else None,
+        "targets": overall["targets"],
+        "decided": overall["decided"],
+        "accuracy": overall["accuracy"],
+        "coverage": overall["coverage"],
         "per_class": per_class,
         "confusion": confusion,
+        "by_altitude": by_altitude,
     }
 
 
