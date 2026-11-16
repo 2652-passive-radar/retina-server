@@ -4,7 +4,8 @@ No identity, no signature, no learned weights.  A target is described by what
 the radar measured it doing (how fast it moves, how high, how hard it turns,
 how fast it climbs, whether it ever stops) and each class in
 target_identity.TARGET_CLASSES is given a flight envelope over those same
-quantities.  A class scores the product of how well each measured feature sits
+quantities (jet, turboprop, piston, helicopter, drone: bins of what produces
+the Doppler signature).  A class scores the product of how well each measured feature sits
 inside its envelope, weighted by how common the class is, and the scores are
 normalised into a distribution.  It is
 deliberately the simplest thing that could work, so anything cleverer has a
@@ -31,15 +32,7 @@ import math
 from dataclasses import dataclass, field
 
 from services.geo import haversine_km
-from services.target_identity import (
-    BALLOON,
-    DRONE,
-    FAST_FIXED_WING,
-    GLIDER,
-    LIGHT_FIXED_WING,
-    ROTORCRAFT,
-    TARGET_CLASSES,
-)
+from services.target_identity import DRONE, HELICOPTER, JET, PISTON, TARGET_CLASSES, TURBOPROP
 
 C_M_S = 299_792_458.0
 MIN_CHORD_S = 10.0
@@ -66,7 +59,7 @@ class Envelope:
     climb_ms: tuple[float, float, float, float]
     can_hover: bool
     # How common the class is among the targets a node sees, before any motion
-    # is measured.  Envelopes overlap (a light aircraft and a helicopter both
+    # is measured.  Envelopes overlap (a piston aircraft and a helicopter both
     # cruise at 50 m/s), and where the motion cannot split them the commoner
     # one is the better guess.  Drones are weighted above their share of the
     # sky because missing one is the costlier mistake.
@@ -77,45 +70,41 @@ class Envelope:
 # tapers how far it can go.  Where a class is unbounded below, an open end
 # means "anything under the typical span is fine", not "impossible".
 ENVELOPES: dict[str, Envelope] = {
-    FAST_FIXED_WING: Envelope(
-        speed_ms=(50, 110, 300, 400),
-        alt_m=(-300, 1_500, 13_000, 18_000),
+    JET: Envelope(
+        speed_ms=(60, 120, 280, 350),
+        alt_m=(-300, 1_500, 12_500, 15_000),
         turn_dps=(-_INF, 0, 3.5, 8),
         climb_ms=(-_INF, 0, 20, 50),
         can_hover=False,
         prior=0.45,
     ),
-    LIGHT_FIXED_WING: Envelope(
-        speed_ms=(15, 30, 65, 110),
-        alt_m=(-_INF, 0, 3_000, 7_000),
+    # Overlaps the jet envelope on purpose: a turboprop at cruise flies as fast
+    # and as high as a regional jet, and motion alone should not pretend
+    # otherwise.  Separating them is expected to need Doppler, and the
+    # scorecard (by altitude band as well) is meant to show where motion fails.
+    TURBOPROP: Envelope(
+        speed_ms=(45, 80, 170, 200),
+        alt_m=(-_INF, 0, 7_500, 9_500),
+        turn_dps=(-_INF, 0, 4, 10),
+        climb_ms=(-_INF, 0, 10, 20),
+        can_hover=False,
+        prior=0.15,
+    ),
+    PISTON: Envelope(
+        speed_ms=(15, 30, 75, 110),
+        alt_m=(-_INF, 0, 3_000, 6_000),
         turn_dps=(-_INF, 0, 6, 15),
         climb_ms=(-_INF, 0, 5, 10),
         can_hover=False,
-        prior=0.25,
+        prior=0.20,
     ),
-    ROTORCRAFT: Envelope(
+    HELICOPTER: Envelope(
         speed_ms=(-_INF, 0, 70, 90),
         alt_m=(-_INF, 0, 1_000, 4_000),
         turn_dps=(-_INF, 0, 5, 15),
         climb_ms=(-_INF, 0, 8, 15),
         can_hover=True,
         prior=0.10,
-    ),
-    GLIDER: Envelope(
-        speed_ms=(12, 18, 45, 70),
-        alt_m=(0, 300, 3_500, 8_000),
-        turn_dps=(-_INF, 0, 15, 25),
-        climb_ms=(-_INF, 0, 5, 10),
-        can_hover=False,
-        prior=0.05,
-    ),
-    BALLOON: Envelope(
-        speed_ms=(-_INF, 0, 12, 25),
-        alt_m=(-_INF, 0, 35_000, 40_000),
-        turn_dps=(-_INF, 0, 2, 5),
-        climb_ms=(-_INF, 0, 5, 8),
-        can_hover=True,
-        prior=0.05,
     ),
     DRONE: Envelope(
         speed_ms=(-_INF, 0, 20, 40),

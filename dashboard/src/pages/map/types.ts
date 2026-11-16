@@ -84,14 +84,7 @@ export interface Aircraft {
   geolocation_method?: string;
 }
 
-export type TargetClassName =
-  | "fast_fixed_wing"
-  | "light_fixed_wing"
-  | "rotorcraft"
-  | "glider"
-  | "balloon"
-  | "drone"
-  | "surface";
+export type TargetClassName = "jet" | "turboprop" | "piston" | "helicopter" | "drone" | "other";
 
 /**
  * A transponder's airframe, looked up by hex in the aircraft registry, or
@@ -109,10 +102,12 @@ export interface TargetIdentity {
   wtc?: string;
   operator?: string;
   category?: string;
+  /** Propeller or main-rotor blade count for the type, where known. */
+  blades?: number;
 }
 
 export interface MotionClass {
-  class: Exclude<TargetClassName, "surface"> | "unknown";
+  class: Exclude<TargetClassName, "other"> | "unknown";
   confidence: number;
   scores: Record<string, number>;
   features: Record<string, number>;

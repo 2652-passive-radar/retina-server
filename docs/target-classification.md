@@ -5,18 +5,23 @@ Every entry in the aircraft feed carries up to two independent answers to
 second is the **motion baseline**, read from how the target moves. Both use one
 vocabulary:
 
-| Class | What it covers |
-| --- | --- |
-| `fast_fixed_wing` | Jets of any size, and turboprops of medium wake or larger (ATR, Dash 8) |
-| `light_fixed_wing` | Piston and single turboprop (C172, Caravan), ultralights |
-| `rotorcraft` | Helicopters, gyrocopters, tiltrotors |
-| `glider` | Gliders |
-| `balloon` | Balloons and airships |
-| `drone` | UAVs |
-| `surface` | Ground vehicles and towers. Label only: the baseline never predicts it |
+| Class | What it covers | Vancouver examples |
+| --- | --- | --- |
+| `jet` | Turbofan and turbojet fixed wing, any size | YVR airliners (737, A320, 777), bizjets |
+| `turboprop` | Turbine-driven propeller fixed wing | Dash 8 and Saab 340 regionals, King Air, turbine Otters and Caravans |
+| `piston` | Piston and electric prop-driven fixed wing, ultralights | Boundary Bay and Pitt Meadows trainers (C172, PA-28), Beaver floatplanes, Harbour Air's electric Beaver |
+| `helicopter` | Any rotary wing | Helijet, air ambulance, police |
+| `drone` | UAVs | Small multirotors and fixed-wing UAVs |
+| `other` | Gliders, balloons and airships, gyrocopters, tiltrotors, ground vehicles, towers. Label only: the baseline never predicts it and the scorecard does not record it | Gliders, balloons, airport vehicles |
 
-The classes are split by flight envelope, not by airframe. Motion can't tell a
-bizjet from an airliner, so the vocabulary doesn't ask it to.
+The classes are bins of what produces the Doppler signature, not of airframe
+shape. The end goal is Doppler and micro-Doppler classification, so the labels
+follow the source of the return: a jet's compressor and turbine blades, a
+propeller's blades, a rotor's blades, or only a small body. A Dash 8 and an
+A320 look alike to a motion model at cruise, but their micro-Doppler differs,
+which is why they are different classes. Jet and turboprop motion envelopes
+overlap on purpose. Separating them is expected to need Doppler, and the
+scorecard is meant to show it.
 
 ## 1. The label: hex lookup
 
@@ -27,8 +32,12 @@ bizjet from an airliner, so the vocabulary doesn't ask it to.
   hex, registration, type designator, flags, description and operator. A type
   table maps each designator to its ICAO class (`L2J`, `H1T`...) and wake
   category. `class_from_icao` reduces that to a class above.
-- **ADS-B emitter category** (`A1`–`A7`, `B1`–`B7`, `C1`–`C3`). This is the
-  fallback for hexes the registry doesn't have. Nodes don't send it today. The
+- **ADS-B emitter category** (`A7`, `B1`–`B7`, `C1`–`C3`). This is the
+  fallback for hexes the registry doesn't have. `A7` is a helicopter, `B6` a
+  drone, `B4` (ultralight) piston, and `B1`–`B3`, `B7` and `C1`–`C3` other.
+  `A1`–`A6` are deliberately unmapped: they are weight classes, and a "small"
+  or "large" aircraft can be a jet, a turboprop or a piston twin, so the
+  category cannot make the one distinction the bins turn on. Nodes don't send it today. The
   adsb.lol cache does, and any ADS-B record that carries `category` is read.
 
 The registry is converted once into a SQLite file,
@@ -47,13 +56,29 @@ built or replaced while the server runs is picked up on the next lookup.
 The feed entry gets `identity`:
 
 ```json
-{"source": "aircraft_db", "class": "fast_fixed_wing", "military": false,
- "registration": "EI-DCL", "type_code": "B738", "type_name": "BOEING 737-800",
- "icao_class": "L2J", "wtc": "M", "operator": "Ryanair"}
+{"source": "aircraft_db", "class": "turboprop", "military": false,
+ "registration": "C-FDHD", "type_code": "DH8D", "type_name": "DHC-8-400 Dash 8Q",
+ "icao_class": "L2T", "wtc": "M", "operator": "Porter", "blades": 6}
 ```
 
 The registry outranks any inference, so where the label has a class, the
 legacy `target_class` (`aircraft` / `drone`) follows it.
+
+### Blade counts
+
+`BLADES` in `target_identity.py` maps a type designator to its propeller or
+main-rotor blade count, and the identity carries `blades` when the type is in
+it. Blade count sets the spacing of the micro-Doppler lines (blade-passing
+frequency is blades times rotation rate), so it is the one airframe fact a
+Doppler classifier wants beyond the class. The values are for the common
+variant of each type, from general knowledge, and should be verified.
+
+| Type | Blades | Type | Blades | Type | Blades |
+| --- | --- | --- | --- | --- | --- |
+| DH8D | 6 | DH8A / DH8B / DH8C | 4 | AT72 / AT76 / AT45 / AT75 | 6 |
+| SF34 | 4 | DHC6 | 3 | C172 / C152 / PA28 | 2 |
+| R44 / R22 | 2 | AS50 | 3 | EC35 / S76 / B412 | 4 |
+| B06 | 2 | EC30 | 3 | A139 | 5 |
 
 Three cases are never looked up:
 
@@ -80,7 +105,7 @@ measure the noise.
 
 Each class has a trapezoidal envelope per feature. The flat top is how the
 class typically flies; the tapers show how far it can stretch. A class scores
-its prior × the product of its memberships. A fixed-wing class that hovers is
+its prior × the product of its memberships. A class that cannot hover (jet, turboprop, piston) is
 penalised. The scores are normalised into a distribution.
 
 A feature the target didn't yield is left out rather than guessed. The verdict
@@ -98,8 +123,8 @@ range rate is at most twice the target's speed, so `|v| ≥ λ·|f_d| / 2`. At
 The feed entry gets `motion_class`:
 
 ```json
-{"class": "fast_fixed_wing", "confidence": 0.98,
- "scores": {"fast_fixed_wing": 0.98, "...": 0.0},
+{"class": "jet", "confidence": 0.98,
+ "scores": {"jet": 0.98, "...": 0.0},
  "features": {"span_s": 60.0, "n_chords": 6, "speed_ms": 231.2, "alt_m": 11000.0}}
 ```
 
@@ -116,6 +141,10 @@ last 6 h with one vote per transponder (its latest pair):
 - **coverage**: how many targets it committed on at all;
 - per-class recall and precision;
 - the full confusion matrix, `unknown` included;
+- `by_altitude`: the same confusion matrix, with targets, decided and
+  accuracy, for each band of the target's altitude (`<1km`, `1-3km`,
+  `3-6km`, `>6km`, `unknown`). It shows whether motion separates a jet from a
+  turboprop only at cruise;
 - whether the registry is loaded, and how old it is.
 
 That number is the one a learned classifier has to beat.

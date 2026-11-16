@@ -8,13 +8,12 @@ import { solveUncertaintyRadiusM, solveUncertaintyRadius95M } from "./uncertaint
 import { usePalette } from "./useMapTheme";
 
 const TARGET_CLASS_LABELS: Record<string, string> = {
-  fast_fixed_wing: "Fast fixed wing",
-  light_fixed_wing: "Light fixed wing",
-  rotorcraft: "Rotorcraft",
-  glider: "Glider",
-  balloon: "Balloon / airship",
+  jet: "Jet",
+  turboprop: "Turboprop",
+  piston: "Piston prop",
+  helicopter: "Helicopter",
   drone: "Drone",
-  surface: "Surface vehicle",
+  other: "Other",
 };
 
 /**
@@ -170,6 +169,7 @@ export default function AircraftDetailPanel({ ac, onClose, groundTruth, trails, 
               )}
               {ac.identity?.operator && <Field label="Operator" value={ac.identity.operator} />}
               {ac.identity?.class && <Field label="Class" value={TARGET_CLASS_LABELS[ac.identity.class] ?? ac.identity.class} />}
+              {ac.identity?.blades != null && <Field label="Blades" value={String(ac.identity.blades)} />}
               {ac.identity?.military && <Field label="Military" value="Yes" />}
               {ac.motion_class && (
                 <Field
