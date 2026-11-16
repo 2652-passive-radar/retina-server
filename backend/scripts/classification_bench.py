@@ -1,0 +1,571 @@
+#!/usr/bin/env python3
+"""Offline classification bench and training-dataset export.
+
+Why this exists
+---------------
+The motion baseline (services.motion_classifier) is scored live only against
+registry labels, which are scarce for the classes that matter and say nothing
+about how a jet and a turboprop differ in their Doppler.  The simulator draws
+its own airframes, so it can say what every target really is.  This bench runs
+the simulator's world through the same pipeline association_bench does
+(per-node tracker -> track-level association -> multinode solve), then writes
+one row per target per 60 s window holding
+
+  * truth: airframe (the label), object type, whether it had a transponder;
+  * the motion baseline's features and verdict, from the target's solved trail
+    where the pipeline solved it, else from the Doppler speed floor alone
+    (target_classification.motion_for's two paths);
+  * comb features (services.comb_features) over every frame a node saw it in;
+  * geometry: nodes that saw it, altitude, body SNR.
+
+and prints the baseline's scorecard against truth and what the comb shows per
+class.  Split train and test BY ``object_id``: a target's windows are not
+independent.
+
+What it is not
+--------------
+Comb features are read at the target's body detection, which the bench finds by
+matching the frame to the target's TRUE delay and Doppler.  A receiver has no
+such handle: real data will need the tracker's association of lines to a track.
+The numbers say what the features carry when association is perfect, not what
+a deployment gets.
+
+Illuminators are real Vancouver DTV transmitters (--tower-set), each node
+using its tower's own carrier.  The receiver area is an example point on the
+Vancouver west side, not a surveyed site.  Line strength is the simulator's interim calibration (micro_doppler.AIRFRAMES), not a
+measurement, and the legacy SNR model caps the body at 25 dB, which leaves a
+rotor line almost never above the detection floor; --snr-model radar (the
+default here) uses the bistatic radar equation with a per-airframe RCS.
+
+Usage:  python scripts/classification_bench.py --out data/classification.parquet
+"""
+
+import argparse
+import math
+import os
+import random
+import statistics
+import sys
+import time
+from collections import Counter, defaultdict
+from dataclasses import asdict, dataclass, field
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+import pyarrow as pa  # noqa: E402
+import pyarrow.parquet as pq  # noqa: E402
+from retina_analytics.association import predict_observation  # noqa: E402
+from retina_analytics.detection_association import DetectionAssociator  # noqa: E402
+from retina_geolocator.multinode_solver import fit_constant_velocity, solve_multinode  # noqa: E402
+from retina_simulation.micro_doppler import AIRFRAMES  # noqa: E402
+from retina_simulation.orchestrator import parse_airframe_mix  # noqa: E402
+from retina_simulation.world import MetroCell, NodeConfig, SimulationWorld  # noqa: E402
+from retina_tracker.tracker import Tracker  # noqa: E402
+
+from scripts.association_bench import (  # noqa: E402
+    MATCH_KM,
+    _beam_gate_ok,
+    _frame_to_detections,
+    _strip_adsb,
+)
+from services import motion_classifier, target_classification  # noqa: E402
+from services.comb_features import CombAccumulator, frame_comb  # noqa: E402
+from services.frame_processor import confirmed_track_views  # noqa: E402
+from services.geo import haversine_km  # noqa: E402
+from services.target_identity import TARGET_CLASSES  # noqa: E402
+
+DEFAULT_MIX = "jet:0.45,turboprop:0.15,piston:0.2,helicopter:0.1,drone:0.1"
+# Public broadcast towers: (name, lat, lon, altitude_ft, fc_hz).  Altitude is
+# the table's site elevation plus antenna height above ground, converted to
+# feet; it assumes those two columns mean exactly that.
+CHAN_DT = ("CHAN-DT", 49.345, -122.972778, 2135.0, 521e6)  # 616.9 m + 33.9 m = 650.8 m
+# CIVI-DT-2 and CHNU-DT are co-located on Mt Seymour's main site, about 1.5 km
+# NE of and 340 m above CHAN.  So "yvr3" has only two transmitter sites and
+# differs from "chan" in frequency more than in geometry.
+CIVI_DT_2 = ("CIVI-DT-2", 49.354444, -122.958333, 3420.0, 491e6)  # 957.7 m + 84.7 m = 1042.4 m
+CHNU_DT = ("CHNU-DT", 49.354444, -122.958333, 3420.0, 533e6)
+TOWER_SETS = {"chan": (CHAN_DT,), "yvr3": (CHAN_DT, CIVI_DT_2, CHNU_DT)}
+DEFAULT_CENTER = (49.26, -123.25)  # Vancouver west side (example receiver area)
+# Nodes sit 3-15 km from the centre, cycling through these radii.
+NODE_RADII_KM = (6.0, 12.0, 4.0, 15.0, 9.0, 3.0)
+WINDOW_S = 60.0
+# A solved trail shorter than this in a window is not motion: the single-node
+# path (Doppler floor alone) is used instead.
+MIN_TRAIL_POINTS = 3
+# Where the body detection may sit from the target's noiseless observation:
+# the simulator's own noise is gauss(0, 0.1-0.2 us) and gauss(0, 2-4 Hz).
+BODY_DELAY_GATE_US = 1.0
+BODY_DOPPLER_GATE_HZ = 10.0
+METRO_RADIUS_KM = 60.0
+
+# Expected comb spacing by class from micro_doppler.AIRFRAMES: the strongest
+# rotor's blades x rev/s.  Printed beside the measured medians.
+EXPECTED_SPACING_HZ = {"jet": None, "turboprop": 102.0, "piston": 90.0, "helicopter": 13.6, "drone": 180.0}
+
+COMB_COLUMNS = (
+    "comb_frames",
+    "comb_frac_frames",
+    "comb_median_n_lines",
+    "comb_max_n_lines",
+    "comb_median_spacing_hz",
+    "comb_spacing_spread_hz",
+    "comb_median_max_offset_hz",
+    "comb_median_symmetry",
+    "comb_median_rel_snr_db",
+)
+COLUMNS: dict[str, pa.DataType] = {
+    "object_id": pa.string(),
+    "window_start_s": pa.float64(),
+    "airframe": pa.string(),
+    "object_type": pa.string(),
+    "has_adsb": pa.bool_(),
+    "motion_source": pa.string(),
+    "span_s": pa.float64(),
+    "n_chords": pa.int64(),
+    "speed_ms": pa.float64(),
+    "max_speed_ms": pa.float64(),
+    "speed_floor_ms": pa.float64(),
+    "alt_m": pa.float64(),
+    "turn_dps": pa.float64(),
+    "climb_ms": pa.float64(),
+    "hover_fraction": pa.float64(),
+    "baseline_class": pa.string(),
+    "baseline_confidence": pa.float64(),
+    **{f"baseline_score_{c}": pa.float64() for c in TARGET_CLASSES},
+    **{c: pa.float64() for c in COMB_COLUMNS},
+    "n_nodes": pa.int64(),
+    "node_ids": pa.string(),
+    "n_solves": pa.int64(),
+    "median_alt_m": pa.float64(),
+    "truth_median_alt_m": pa.float64(),
+    "median_body_snr_db": pa.float64(),
+    "n_frames": pa.int64(),
+}
+
+
+def _median(values):
+    values = [v for v in values if v is not None]
+    return statistics.median(values) if values else None
+
+
+@dataclass
+class Target:
+    """What the bench knows of one simulated aircraft: truth, sightings, solves."""
+
+    object_id: str
+    airframe: str
+    object_type: str
+    has_adsb: bool
+    # (t_s, node_id, body_snr_db, body_doppler_hz, truth_alt_m, CombObs)
+    sightings: list = field(default_factory=list)
+    # (t_s, lat, lon, alt_m)
+    solves: list = field(default_factory=list)
+
+
+@dataclass
+class Result:
+    targets: dict[str, Target] = field(default_factory=dict)
+    rows: list[dict] = field(default_factory=list)
+    frames: int = 0
+    solves: int = 0
+    wall_s: float = 0.0
+    nodes: dict = field(default_factory=dict)
+
+
+def _ring_nodes(n_nodes, center, towers, fc_hz_override, doppler_window):
+    lat0, lon0 = center
+    nodes = []
+    for i in range(n_nodes):
+        _, tx_lat, tx_lon, tx_alt_ft, tower_fc = towers[i % len(towers)]
+        ring_km = NODE_RADII_KM[i % len(NODE_RADII_KM)]
+        brg = 2.0 * math.pi * i / n_nodes
+        lat = lat0 + math.degrees(ring_km * math.cos(brg) / 6371.0)
+        lon = lon0 + math.degrees(ring_km * math.sin(brg) / (6371.0 * math.cos(math.radians(lat0))))
+        # Aimed at the metro core, so every beam overlaps over the traffic.
+        aim = (math.degrees(brg) + 180.0) % 360.0
+        nodes.append(
+            NodeConfig(
+                node_id=f"cls-{i:02d}",
+                rx_lat=lat,
+                rx_lon=lon,
+                rx_alt_ft=100.0,
+                tx_lat=tx_lat,
+                tx_lon=tx_lon,
+                tx_alt_ft=tx_alt_ft,
+                fc_hz=fc_hz_override or tower_fc,
+                doppler_min=-doppler_window,
+                doppler_max=doppler_window,
+                beam_azimuth_deg=aim,
+                max_range_km=100.0,
+                max_bistatic_range_km=100.0,
+            )
+        )
+    return nodes
+
+
+def build_world(args) -> SimulationWorld:
+    mix = parse_airframe_mix(args.airframe_mix)
+    world = SimulationWorld(center_lat=args.center[0], center_lon=args.center[1])
+    for nc in _ring_nodes(args.nodes, args.center, TOWER_SETS[args.tower_set], args.fc_hz, args.doppler_window):
+        world.add_node(nc)
+    world.metro_cells = [MetroCell(core_lat=args.center[0], core_lon=args.center[1], radius_km=METRO_RADIUS_KM)]
+    world.frac_metro_traffic = 1.0
+    world.min_aircraft = args.min_aircraft
+    world.max_aircraft = args.max_aircraft
+    # Drones are an object type in the world, not an entry of airframe_mix,
+    # which is drawn only for non-drone aircraft.
+    world.frac_drone = mix.get("drone", 0.0)
+    world.frac_dark = 0.15
+    rest = {k: v for k, v in mix.items() if k != "drone"}
+    if len(rest) == 1:
+        rest["jet" if "jet" not in rest else "turboprop"] = 0.0
+    world.airframe_mix = rest or {"jet": 1.0}
+    world.micro_doppler_enabled = args.micro_doppler
+    world.cpi_s = args.cpi_s
+    world.snr_model = args.snr_model
+    return world
+
+
+def _body_detection(frame, d_us, f_hz):
+    """Index of the frame detection that is the target's body, or None.
+
+    The strongest detection near the target's true delay and Doppler: a comb
+    line sits at the same delay but 15 dB or more below the body.  This uses
+    the truth the bench holds; a receiver has only its tracker's association.
+    """
+    best = None
+    for i, (d, f, s) in enumerate(zip(frame["delay"], frame["doppler"], frame["snr"])):
+        if abs(d - d_us) <= BODY_DELAY_GATE_US and abs(f - f_hz) <= BODY_DOPPLER_GATE_HZ:
+            if best is None or s > frame["snr"][best]:
+                best = i
+    return best
+
+
+def run(args) -> Result:
+    random.seed(args.seed)
+    t_wall = time.perf_counter()
+    world = build_world(args)
+    node_cfgs = {nid: asdict(nc) for nid, nc in world.nodes.items()}
+    bin_hz = 1.0 / args.cpi_s
+    assoc = DetectionAssociator(
+        grid_step_km=3.0,
+        cv_fit=fit_constant_velocity,
+        cv_chi2_max=2.0,
+        cv_min_span_s=12.0,
+        cv_min_epochs=4,
+        cv_exclusive=True,
+    )
+    for nid, cfg in node_cfgs.items():
+        assoc.register_node(nid, cfg)
+    # The library rate-limits on wall clock; a replay compresses minutes into
+    # seconds, so cadence is driven from simulated time below instead.
+    assoc._ASSOC_MIN_INTERVAL_S = 0.0
+    trackers = {nid: Tracker() for nid in node_cfgs}
+    res = Result(nodes=world.nodes)
+    node_ids = sorted(node_cfgs)
+    next_send = {nid: i * (args.frame_interval / len(node_ids)) for i, nid in enumerate(node_ids)}
+    last_assoc: dict[str, float] = {}
+    t = 0.0
+    while t < args.duration_s:
+        world.step(args.dt, mode="adsb")
+        t += args.dt
+        ts_ms = int(t * 1000)
+        due = [nid for nid in node_ids if next_send[nid] <= t]
+        if not due:
+            continue
+        truth = [(ac.lat, ac.lon, ac.object_id, ac.speed_km_s * 1000.0) for ac in world.aircraft]
+        for nid in due:
+            next_send[nid] += args.frame_interval
+            frame = world.generate_detections_for_node(nid, ts_ms)
+            res.frames += 1
+            _collect_sightings(res, world, assoc, nid, frame, t, bin_hz)
+            if args.blind:
+                frame = _strip_adsb(frame)
+            trackers[nid].process_frame(_frame_to_detections(frame), ts_ms)
+            assoc._pending_tracks[nid] = confirmed_track_views(trackers[nid], 20, ts_ms)
+            if (t - last_assoc.get(nid, -1e9)) < args.assoc_interval:
+                continue
+            last_assoc[nid] = t
+            round_ = assoc.submit_tracks_round(nid, assoc._pending_tracks.get(nid, []), ts_ms)
+            for s_in in assoc.format_track_pairs_for_solver(round_.pairs):
+                if s_in.get("n_nodes", 0) < 2:
+                    continue
+                try:
+                    out = solve_multinode(s_in, node_cfgs)
+                except Exception:
+                    continue
+                if not out or not out.get("success") or not _beam_gate_ok(out, s_in, node_cfgs, lambda _n: None):
+                    continue
+                d, oid = min(
+                    ((haversine_km(out["lat"], out["lon"], a, b), oid) for a, b, oid, _ in truth),
+                    default=(math.inf, None),
+                )
+                if d <= MATCH_KM and oid in res.targets:
+                    res.targets[oid].solves.append((t, out["lat"], out["lon"], out.get("alt_m")))
+                    res.solves += 1
+    res.rows = build_rows(res, node_cfgs, args.min_frames)
+    res.wall_s = time.perf_counter() - t_wall
+    return res
+
+
+def _collect_sightings(res, world, assoc, nid, frame, t, bin_hz):
+    if not frame["delay"]:
+        return
+    geo = assoc.node_geometries[nid]
+    for ac in world.aircraft:
+        d_us, f_hz = predict_observation(
+            geo, ac.lat, ac.lon, ac.alt_km, ac.vel_east * 1000.0, ac.vel_north * 1000.0, ac.vel_up * 1000.0
+        )
+        i = _body_detection(frame, d_us, f_hz)
+        if i is None:
+            continue
+        tgt = res.targets.get(ac.object_id)
+        if tgt is None:
+            tgt = res.targets[ac.object_id] = Target(ac.object_id, ac.airframe, ac.object_type, ac.has_adsb)
+        obs = frame_comb(
+            frame["delay"], frame["doppler"], frame["snr"], frame["delay"][i], frame["doppler"][i], bin_hz=bin_hz
+        )
+        tgt.sightings.append((t, nid, frame["snr"][i], frame["doppler"][i], ac.alt_km * 1000.0, obs))
+
+
+def _motion_for_window(tgt, t0, t1, node_cfgs):
+    """The baseline's verdict on one window, by the same two paths motion_for takes."""
+    trail = sorted((t, lat, lon, alt) for t, lat, lon, alt in tgt.solves if t0 <= t < t1)
+    if len(trail) >= MIN_TRAIL_POINTS and trail[-1][0] - trail[0][0] >= motion_classifier.MIN_CHORD_S:
+        return "multinode", motion_classifier.classify(trail)
+    # The least speed a Doppler implies is a lower bound, so the window's
+    # largest one is the tightest; production has only the latest frame's.
+    floors = [
+        motion_classifier.doppler_speed_floor_ms(f, node_cfgs[nid]["fc_hz"])
+        for ts, nid, _, f, _, _ in tgt.sightings
+        if t0 <= ts < t1
+    ]
+    floors = [x for x in floors if x is not None]
+    return "single_node", motion_classifier.classify(None, speed_floor_ms=max(floors) if floors else None)
+
+
+def build_rows(res, node_cfgs, min_frames) -> list[dict]:
+    rows = []
+    for tgt in sorted(res.targets.values(), key=lambda x: x.object_id):
+        windows = sorted({math.floor(s[0] / WINDOW_S) * WINDOW_S for s in tgt.sightings})
+        for w0 in windows:
+            seen = [s for s in tgt.sightings if w0 <= s[0] < w0 + WINDOW_S]
+            if len(seen) < min_frames:
+                continue
+            source, motion = _motion_for_window(tgt, w0, w0 + WINDOW_S, node_cfgs)
+            acc = CombAccumulator()
+            for s in seen:
+                acc.add(s[5])
+            comb = acc.summary()
+            f = motion.features
+            solved = [alt for ts, _, _, alt in tgt.solves if w0 <= ts < w0 + WINDOW_S and alt is not None]
+            row = {
+                "object_id": tgt.object_id,
+                "window_start_s": w0,
+                "airframe": tgt.airframe,
+                "object_type": tgt.object_type,
+                "has_adsb": bool(tgt.has_adsb),
+                "motion_source": source,
+                "span_s": f.span_s,
+                "n_chords": f.n_chords,
+                "speed_ms": f.speed_ms,
+                "max_speed_ms": f.max_speed_ms,
+                "speed_floor_ms": f.speed_floor_ms,
+                "alt_m": f.alt_m,
+                "turn_dps": f.turn_dps,
+                "climb_ms": f.climb_ms,
+                "hover_fraction": f.hover_fraction,
+                "baseline_class": motion.cls,
+                "baseline_confidence": motion.confidence,
+                **{f"baseline_score_{c}": motion.scores.get(c) for c in TARGET_CLASSES},
+                "comb_frames": comb["frames"],
+                "comb_frac_frames": comb["frac_frames_with_comb"],
+                "comb_median_n_lines": comb["median_n_lines"],
+                "comb_max_n_lines": comb["max_n_lines"],
+                "comb_median_spacing_hz": comb["median_spacing_hz"],
+                "comb_spacing_spread_hz": comb["spacing_spread_hz"],
+                "comb_median_max_offset_hz": comb["median_max_offset_hz"],
+                "comb_median_symmetry": comb["median_symmetry"],
+                "comb_median_rel_snr_db": comb["median_rel_snr_db"],
+                "n_nodes": len({s[1] for s in seen}),
+                "node_ids": ",".join(sorted({s[1] for s in seen})),
+                "n_solves": len(solved),
+                "median_alt_m": _median(solved),
+                "truth_median_alt_m": _median([s[4] for s in seen]),
+                "median_body_snr_db": _median([s[2] for s in seen]),
+                "n_frames": len(seen),
+            }
+            rows.append(row)
+    return rows
+
+
+def write_parquet(rows, path) -> None:
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    schema = pa.schema(list(COLUMNS.items()))
+    pq.write_table(pa.Table.from_pylist(rows, schema=schema), path)
+
+
+def _fmt(x, nd=1):
+    return "-" if x is None else f"{x:.{nd}f}"
+
+
+def _vote_per_aircraft(rows):
+    """One (truth, verdict, alt) per aircraft: its most common decided verdict, unknown on a tie."""
+    by = defaultdict(list)
+    for r in rows:
+        by[r["object_id"]].append(r)
+    out = []
+    for rs in by.values():
+        counts = Counter(r["baseline_class"] for r in rs if r["baseline_class"] != motion_classifier.UNKNOWN)
+        top = counts.most_common(2)
+        verdict = top[0][0] if top and (len(top) == 1 or top[0][1] > top[1][1]) else motion_classifier.UNKNOWN
+        out.append((rs[0]["airframe"], verdict, _median([r["alt_m"] for r in rs])))
+    return out
+
+
+def _print_card(title, card):
+    print(f"\n{title}")
+    print(
+        f"  targets={card['targets']} decided={card['decided']} accuracy={card['accuracy']} coverage={card['coverage']}"
+    )
+    labels = list(TARGET_CLASSES) + [motion_classifier.UNKNOWN]
+    print("  truth \\ predicted  " + "".join(f"{p:>11}" for p in labels))
+    for truth in TARGET_CLASSES:
+        print(f"  {truth:<18}" + "".join(f"{card['confusion'][truth][p]:>11}" for p in labels))
+    print(
+        "  per class: "
+        + "  ".join(f"{c}: recall={v['recall']} precision={v['precision']}" for c, v in card["per_class"].items())
+    )
+    print(
+        "  by altitude band (targets / decided / accuracy): "
+        + "; ".join(f"{b}: {v['targets']}/{v['decided']}/{v['accuracy']}" for b, v in card["by_altitude"].items())
+    )
+
+
+def report(res: Result, args, command: str) -> None:
+    rows = res.rows
+    print("classification bench")
+    print(f"command: {command}")
+    print(
+        f"scene: {args.nodes} nodes 3-15 km from {args.center[0]},{args.center[1]} (Vancouver west side, example "
+        f"receiver area), {args.duration_s:.0f}s, seed {args.seed}, doppler +/-{args.doppler_window:.0f} Hz, "
+        f"cpi={args.cpi_s}s, micro-doppler={'on' if args.micro_doppler else 'off'}, snr-model={args.snr_model}, "
+        f"{'blind' if args.blind else 'ADS-B tagged'}, mix={args.airframe_mix}"
+    )
+    for nid, nc in sorted(res.nodes.items()):
+        print(
+            f"  node {nid}: {nc.rx_lat:.4f},{nc.rx_lon:.4f}  tower {nc.tx_lat:.6f},{nc.tx_lon:.6f} "
+            f"@ {nc.tx_alt_ft:.0f} ft  fc={nc.fc_hz / 1e6:.0f} MHz"
+        )
+    print(f"towers: --tower-set {args.tower_set}")
+    print(f"ran {res.frames} frames, {res.solves} solves matched to a target in {res.wall_s:.0f}s wall")
+    print("\nrows and targets per class (truth airframe)")
+    print(f"  {'class':<12}{'targets':>9}{'rows':>7}{'rows from multinode solves':>30}")
+    for c in TARGET_CLASSES:
+        rs = [r for r in rows if r["airframe"] == c]
+        print(
+            f"  {c:<12}{len({r['object_id'] for r in rs}):>9}{len(rs):>7}"
+            f"{sum(1 for r in rs if r['motion_source'] == 'multinode'):>30}"
+        )
+    print(f"  total: {len(rows)} rows, {len({r['object_id'] for r in rows})} targets")
+    if not rows:
+        print("no rows: nothing was seen for min-frames frames in a window")
+        return
+    _print_card(
+        f"motion baseline vs simulator truth, per row (window) [{len(rows)} rows]",
+        target_classification.build_card([(r["airframe"], r["baseline_class"], r["alt_m"]) for r in rows]),
+    )
+    _print_card(
+        "motion baseline vs simulator truth, one vote per aircraft",
+        target_classification.build_card(_vote_per_aircraft(rows)),
+    )
+    print("\ncomb features per class (rows; medians over rows that showed a comb)")
+    print(
+        f"  {'class':<12}{'rows':>6}{'comb rows':>10}{'frames w/ comb':>16}{'n_lines':>9}{'spacing Hz':>12}"
+        f"{'expected':>10}{'spread':>8}{'symmetry':>10}{'rel SNR':>9}"
+    )
+    for c in TARGET_CLASSES:
+        rs = [r for r in rows if r["airframe"] == c]
+        comb = [r for r in rs if r["comb_median_n_lines"] is not None]
+        print(
+            f"  {c:<12}{len(rs):>6}{len(comb):>10}{_fmt(_median([r['comb_frac_frames'] for r in rs]), 2):>16}"
+            f"{_fmt(_median([r['comb_median_n_lines'] for r in comb])):>9}"
+            f"{_fmt(_median([r['comb_median_spacing_hz'] for r in comb])):>12}"
+            f"{_fmt(EXPECTED_SPACING_HZ[c]):>10}"
+            f"{_fmt(_median([r['comb_spacing_spread_hz'] for r in comb])):>8}"
+            f"{_fmt(_median([r['comb_median_symmetry'] for r in comb]), 2):>10}"
+            f"{_fmt(_median([r['comb_median_rel_snr_db'] for r in comb])):>9}"
+        )
+    jt = {c: [r for r in rows if r["airframe"] == c] for c in ("jet", "turboprop")}
+    print("\njet vs turboprop: where motion cannot split them, does the comb?")
+    for c, rs in jt.items():
+        has = sum(1 for r in rs if (r["comb_median_n_lines"] or 0) >= 2)
+        print(
+            f"  {c:<10} rows={len(rs):>4}  comb of >=2 lines in {has}/{len(rs)} rows; "
+            f"baseline calls it: {dict(Counter(r['baseline_class'] for r in rs))}"
+        )
+
+
+def _latlon(text):
+    lat, lon = text.split(",")
+    return float(lat), float(lon)
+
+
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--duration-s", type=float, default=900.0, help="simulated seconds")
+    p.add_argument("--airframe-mix", default=DEFAULT_MIX, help="class:weight,... (drone is the share of drones)")
+    p.add_argument("--fc-hz", type=float, default=None, help="override every node's carrier (default: its tower's)")
+    p.add_argument("--doppler-window", type=float, default=1000.0, help="node Doppler window, +/- Hz")
+    p.add_argument("--micro-doppler", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--cpi-s", type=float, default=0.5)
+    p.add_argument("--snr-model", choices=("legacy", "radar"), default="radar")
+    p.add_argument("--nodes", type=int, default=4)
+    p.add_argument(
+        "--center",
+        type=_latlon,
+        default=DEFAULT_CENTER,
+        metavar="LAT,LON",
+        help="receiver area; default: Vancouver west side (example)",
+    )
+    p.add_argument(
+        "--tower-set",
+        choices=tuple(TOWER_SETS),
+        default="chan",
+        help="chan: every node uses CHAN-DT. yvr3: node i uses tower i mod 3 of CHAN-DT, CIVI-DT-2, CHNU-DT",
+    )
+    p.add_argument("--out", help="write the per-window rows here as Parquet (e.g. data/classification.parquet)")
+    p.add_argument(
+        "--tagged",
+        dest="blind",
+        action="store_false",
+        default=True,
+        help="feed per-detection ADS-B tags to association (default is blind, as association_bench)",
+    )
+    p.add_argument("--min-aircraft", type=int, default=10)
+    p.add_argument("--max-aircraft", type=int, default=16)
+    p.add_argument("--dt", type=float, default=1.0)
+    p.add_argument("--frame-interval", type=float, default=2.0)
+    p.add_argument("--assoc-interval", type=float, default=6.0, help="seconds between a node's association rounds")
+    p.add_argument("--min-frames", type=int, default=3, help="drop windows in which a target was seen fewer times")
+    args = p.parse_args(argv)
+    unknown = [k for k in parse_airframe_mix(args.airframe_mix) if k not in AIRFRAMES]
+    if unknown:
+        p.error(f"unknown airframe(s) {unknown}")
+    return args
+
+
+def main(argv=None) -> Result:
+    args = parse_args(argv)
+    command = "python scripts/classification_bench.py " + " ".join(sys.argv[1:] if argv is None else argv)
+    res = run(args)
+    report(res, args, command)
+    if args.out:
+        write_parquet(res.rows, args.out)
+        print(f"\nwrote {len(res.rows)} rows to {args.out}")
+    return res
+
+
+if __name__ == "__main__":
+    main()

@@ -207,9 +207,7 @@ def classify_entry(entry: dict, now: float | None = None) -> dict:
             return entry
     sim_truth = _sim_truth_class(entry)
     if sim_truth is not None:
-        _record(
-            sim_truth[0], sim_truth[1], motion.cls, motion.confidence, now, motion.features.alt_m, LABEL_SIM_TRUTH
-        )
+        _record(sim_truth[0], sim_truth[1], motion.cls, motion.confidence, now, motion.features.alt_m, LABEL_SIM_TRUTH)
     return entry
 
 

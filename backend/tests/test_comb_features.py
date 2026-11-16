@@ -85,7 +85,9 @@ def test_symmetry_and_relative_snr():
 
 
 def test_offsets_are_sorted_and_relative_snr_needs_a_body():
-    obs = frame_comb([BODY_DELAY] * 2, [BODY_DOPPLER + 204.0, BODY_DOPPLER - 102.0], [8.0, 9.0], BODY_DELAY, BODY_DOPPLER)
+    obs = frame_comb(
+        [BODY_DELAY] * 2, [BODY_DOPPLER + 204.0, BODY_DOPPLER - 102.0], [8.0, 9.0], BODY_DELAY, BODY_DOPPLER
+    )
     assert obs.offsets_hz == (-102.0, 204.0)
     assert obs.mean_rel_snr_db is None
 
@@ -125,9 +127,7 @@ def test_spacing_recovered_from_a_simulated_turboprop(monkeypatch):
     # The shipped line strength leaves most lines under the detection floor at
     # the legacy SNR model, so boost it as the simulator's own tests do: this
     # tests the recovery of the spacing, not the interim calibration.
-    monkeypatch.setitem(
-        AIRFRAMES, "turboprop", tuple(Rotor(6, 2.05, 17.0, "forward", 15.0) for _ in range(2))
-    )
+    monkeypatch.setitem(AIRFRAMES, "turboprop", tuple(Rotor(6, 2.05, 17.0, "forward", 15.0) for _ in range(2)))
     random.seed(3)
     world = SimulationWorld(center_lat=rx_lat, center_lon=rx_lon)
     world.add_node(
