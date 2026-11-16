@@ -456,3 +456,75 @@ class TestFeed:
     def test_empty_scorecard(self):
         card = target_classification.scorecard()
         assert (card["targets"], card["accuracy"], card["coverage"]) == (0, None, None)
+
+
+class TestSimTruth:
+    def _dark_sim_entry(self, gt_hex, airframe, speed_ms=150, alt_m=7_000, **meta):
+        state.ground_truth_meta[gt_hex] = {"airframe": airframe, **meta}
+        entry = _feed_entry("mn" + gt_hex, straight_trail(speed_ms, alt_m), ground_truth_hex=gt_hex)
+        entry["target_class"] = "aircraft"
+        return entry
+
+    def test_a_dark_sim_target_is_scored_against_the_simulator_airframe(self):
+        entry = self._dark_sim_entry("a1b2c3", "turboprop")
+        target_classification.classify_entry(entry, now=2000.0)
+        assert "identity" not in entry
+        card = target_classification.scorecard(now=2000.0)
+        assert card["targets"] == 1
+        assert card["confusion"][TURBOPROP][entry["motion_class"]["class"]] == 1
+        assert card["by_label_source"]["sim_truth"]["targets"] == 1
+        assert card["by_label_source"]["hex"]["targets"] == 0
+
+    def test_hex_and_sim_labels_are_scored_apart_and_together(self, registry):
+        hexed = _feed_entry("mnaaaaaaaaaa", straight_trail(230, 11_000), adsb_hex="4ca1f2")
+        simmed = self._dark_sim_entry("a1b2c3", "jet", speed_ms=230, alt_m=11_000)
+        target_classification.classify_feed([hexed, simmed], now=2000.0)
+        card = target_classification.scorecard(now=2000.0)
+        assert card["targets"] == 2
+        by_source = card["by_label_source"]
+        assert (by_source["hex"]["targets"], by_source["sim_truth"]["targets"]) == (1, 1)
+        assert set(by_source["sim_truth"]) == set(card) - {"window_s", "by_label_source"}
+        assert card["confusion"][JET][JET] == 2
+
+    def test_sim_truth_never_reaches_the_identity(self):
+        entry = self._dark_sim_entry("a1b2c3", "helicopter")
+        target_classification.classify_entry(entry, now=2000.0)
+        assert "identity" not in entry
+        assert entry["target_class"] == "aircraft"
+
+    @pytest.mark.parametrize("airframe", [None, "", "glider"])
+    def test_an_unusable_airframe_records_nothing(self, airframe):
+        entry = self._dark_sim_entry("a1b2c3", airframe)
+        target_classification.classify_entry(entry, now=2000.0)
+        assert target_classification.scorecard(now=2000.0)["targets"] == 0
+
+    def test_an_entry_with_no_ground_truth_hex_records_nothing(self):
+        entry = _feed_entry("mnbbbbbbbbbb", straight_trail(150, 7_000))
+        target_classification.classify_entry(entry, now=2000.0)
+        assert target_classification.scorecard(now=2000.0)["targets"] == 0
+
+    def test_a_hex_label_wins_over_sim_truth(self, registry):
+        state.ground_truth_meta["4ca1f2"] = {"airframe": "piston", "source": "live"}
+        entry = _feed_entry("4ca1f2", straight_trail(230, 11_000), ground_truth_hex="4ca1f2")
+        target_classification.classify_entry(entry, now=2000.0)
+        by_source = target_classification.scorecard(now=2000.0)["by_label_source"]
+        assert (by_source["hex"]["targets"], by_source["sim_truth"]["targets"]) == (1, 0)
+
+    def test_a_live_mirrored_aircraft_is_looked_up_despite_the_sim_world(self, registry):
+        state.adsb_aircraft["4ca1f2"] = {"hex": "4ca1f2", "world": "sim"}
+        state.ground_truth_meta["4ca1f2"] = {"airframe": "jet", "source": "live"}
+        entry = _feed_entry("4ca1f2", straight_trail(230, 11_000))
+        target_classification.classify_entry(entry, now=2000.0)
+        assert entry["identity"]["registration"] == "EI-DCL"
+
+    def test_a_sim_spawned_hex_is_still_not_looked_up(self, registry):
+        state.adsb_aircraft["4ca1f2"] = {"hex": "4ca1f2", "world": "sim"}
+        state.ground_truth_meta["4ca1f2"] = {"airframe": "jet", "source": "sim"}
+        entry = _feed_entry("4ca1f2", straight_trail(230, 11_000))
+        target_classification.classify_entry(entry, now=2000.0)
+        assert "identity" not in entry
+
+    def test_the_empty_card_has_both_sources(self):
+        by_source = target_classification.scorecard()["by_label_source"]
+        assert list(by_source) == ["hex", "sim_truth"]
+        assert by_source["sim_truth"]["accuracy"] is None

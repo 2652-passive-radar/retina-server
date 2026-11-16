@@ -93,6 +93,10 @@ async def push_ground_truth_snapshot(body: dict = Body(...), _key=Depends(_verif
             # "live" for an aircraft the simulator mirrored from the ADS-B
             # feed, "sim" for its own spawns (older fleets send neither).
             "source": ac.get("source") or "sim",
+            # The simulator's rotating-part class (jet, turboprop, ...): the
+            # truth the classifier scorecard scores a transponder-less target
+            # against.  None from a simulator that predates the field.
+            "airframe": ac.get("airframe"),
         }
         # Flag anomalous objects and log events
         if ac.get("is_anomalous"):

@@ -21,6 +21,14 @@ Wherever a target has both, the pair is a labelled example: the identity is
 ground truth for the motion baseline.  ``scorecard()`` reports the confusion
 matrix over each transponder's latest pair inside SCORE_WINDOW_S, one vote per
 aircraft so a long-lived airliner does not outvote everything else.
+
+A simulated target carries no registry identity, but the simulator knows its
+airframe.  Where an entry resolves to one (``ground_truth_hex``) the pair is
+recorded against that truth instead, under ``label_source`` "sim_truth", and the
+scorecard keeps the two apart in ``by_label_source``: a hex label is a public
+fact about a real aircraft, a simulator airframe only says how well the
+baseline does on a world we drew ourselves.  The truth is never copied into
+``identity``, which is a public label.
 """
 
 import logging
@@ -50,7 +58,12 @@ SCORE_WINDOW_S = 6 * 3600.0
 _SCORE_MAX_TARGETS = 20_000
 
 _score_lock = threading.Lock()
-_latest: "OrderedDict[str, tuple[str, str, float, float, float | None]]" = OrderedDict()
+_latest: "OrderedDict[str, tuple[str, str, float, float, float | None, str]]" = OrderedDict()
+
+# Where a recorded label came from.
+LABEL_HEX = "hex"
+LABEL_SIM_TRUTH = "sim_truth"
+LABEL_SOURCES = (LABEL_HEX, LABEL_SIM_TRUTH)
 
 # Altitude bands for the scorecard, upper bound exclusive, in metres.
 ALTITUDE_BANDS = (("<1km", 1_000.0), ("1-3km", 3_000.0), ("3-6km", 6_000.0), (">6km", math.inf))
@@ -85,7 +98,14 @@ def _is_simulated(entry: dict, hex_code: str) -> bool:
     A simulator draws its hexes at random, so one would look up as whatever
     real aircraft happens to own that address.  The ADS-B record's own world
     stamp decides where there is one, the reporting node's world otherwise.
+
+    The exception is a live-mirrored aircraft: the simulator can replay a real
+    transponder from a feed into the sim world, keeping its true hex, and the
+    ground-truth push marks it ``source: "live"``.  That hex is a real address
+    and the registry knows it, so it is looked up like any other real target.
     """
+    if state.ground_truth_meta.get(hex_code, {}).get("source") == "live":
+        return False
     rec = state.adsb_aircraft.get(hex_code)
     if rec is not None and rec.get("world"):
         return rec["world"] == "sim"
@@ -139,17 +159,32 @@ def motion_for(entry: dict) -> motion_classifier.MotionClass:
 
 
 def _record(
-    hex_code: str, truth: str, predicted: str, confidence: float, now: float, alt_m: float | None = None
+    hex_code: str,
+    truth: str,
+    predicted: str,
+    confidence: float,
+    now: float,
+    alt_m: float | None = None,
+    label_source: str = LABEL_HEX,
 ) -> None:
     with _score_lock:
         _latest.pop(hex_code, None)
-        _latest[hex_code] = (truth, predicted, confidence, now, alt_m)
+        _latest[hex_code] = (truth, predicted, confidence, now, alt_m, label_source)
         cutoff = now - SCORE_WINDOW_S
         while _latest:
             oldest = next(iter(_latest.values()))
             if oldest[3] >= cutoff and len(_latest) <= _SCORE_MAX_TARGETS:
                 break
             _latest.popitem(last=False)
+
+
+def _sim_truth_class(entry: dict) -> tuple[str, str] | None:
+    """``(ground-truth hex, airframe)`` for an entry that is a simulated target, else None."""
+    gt_hex = entry.get("ground_truth_hex")
+    if not gt_hex:
+        return None
+    airframe = state.ground_truth_meta.get(gt_hex, {}).get("airframe")
+    return (gt_hex, airframe) if airframe in TARGET_CLASSES else None
 
 
 def classify_entry(entry: dict, now: float | None = None) -> dict:
@@ -169,6 +204,12 @@ def classify_entry(entry: dict, now: float | None = None) -> dict:
             entry["target_class"] = legacy
         if identity.get("class") in TARGET_CLASSES:
             _record(hex_code, identity["class"], motion.cls, motion.confidence, now, motion.features.alt_m)
+            return entry
+    sim_truth = _sim_truth_class(entry)
+    if sim_truth is not None:
+        _record(
+            sim_truth[0], sim_truth[1], motion.cls, motion.confidence, now, motion.features.alt_m, LABEL_SIM_TRUTH
+        )
     return entry
 
 
@@ -206,8 +247,11 @@ def _confusion(rows: list[tuple[str, str]]) -> dict:
     }
 
 
-def scorecard(now: float | None = None) -> dict:
-    """The baseline against the hex label, one vote per aircraft.
+def build_card(rows: list[tuple[str, str, float | None]]) -> dict:
+    """The scorecard body for ``(truth, predicted, alt_m)`` triples, one per target.
+
+    Split out of ``scorecard`` so an offline run (scripts/classification_bench.py)
+    scores its own pairs with exactly the arithmetic the live card uses.
 
     ``accuracy`` is over the targets the baseline committed on; ``coverage``
     is how many it committed on at all.  Both None with nothing to score.
@@ -218,11 +262,7 @@ def scorecard(now: float | None = None) -> dict:
     turboprop only at cruise: the two fly alike up high, and a turboprop's
     lower ceiling and climb are all that tells them apart below it.
     """
-    now = time.time() if now is None else now
-    cutoff = now - SCORE_WINDOW_S
-    with _score_lock:
-        rows = [v for v in _latest.values() if v[3] >= cutoff]
-    overall = _confusion([(t, p) for t, p, _, _, _ in rows])
+    overall = _confusion([(t, p) for t, p, _ in rows])
     confusion = overall["confusion"]
     per_class = {}
     for cls in TARGET_CLASSES:
@@ -235,11 +275,10 @@ def scorecard(now: float | None = None) -> dict:
             "precision": round(confusion[cls][cls] / predicted_as, 3) if predicted_as else None,
         }
     by_altitude = {
-        band: _confusion([(t, p) for t, p, _, _, alt in rows if _altitude_band(alt) == band])
+        band: _confusion([(t, p) for t, p, alt in rows if _altitude_band(alt) == band])
         for band in [name for name, _ in ALTITUDE_BANDS] + [UNKNOWN_ALTITUDE]
     }
     return {
-        "window_s": SCORE_WINDOW_S,
         "targets": overall["targets"],
         "decided": overall["decided"],
         "accuracy": overall["accuracy"],
@@ -247,6 +286,29 @@ def scorecard(now: float | None = None) -> dict:
         "per_class": per_class,
         "confusion": confusion,
         "by_altitude": by_altitude,
+    }
+
+
+def scorecard(now: float | None = None) -> dict:
+    """The baseline against the labels, one vote per aircraft.
+
+    The overall card counts every labelled target, hex and simulator truth
+    alike; ``by_label_source`` repeats it (same shape) for each source so a
+    figure measured on our own simulated world is never read as one measured
+    on real aircraft.  See ``build_card`` for what each card holds.
+    """
+    now = time.time() if now is None else now
+    cutoff = now - SCORE_WINDOW_S
+    with _score_lock:
+        rows = [v for v in _latest.values() if v[3] >= cutoff]
+    card = build_card([(t, p, alt) for t, p, _, _, alt, _ in rows])
+    return {
+        "window_s": SCORE_WINDOW_S,
+        **card,
+        "by_label_source": {
+            source: build_card([(t, p, alt) for t, p, _, _, alt, src in rows if src == source])
+            for source in LABEL_SOURCES
+        },
     }
 
 
