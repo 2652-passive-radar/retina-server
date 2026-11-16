@@ -79,12 +79,22 @@ DEFAULT_MIX = "jet:0.45,turboprop:0.15,piston:0.2,helicopter:0.1,drone:0.1"
 # the table's site elevation plus antenna height above ground, converted to
 # feet; it assumes those two columns mean exactly that.
 CHAN_DT = ("CHAN-DT", 49.345, -122.972778, 2135.0, 521e6)  # 616.9 m + 33.9 m = 650.8 m
-# CIVI-DT-2 and CHNU-DT are co-located on Mt Seymour's main site, about 1.5 km
-# NE of and 340 m above CHAN.  So "yvr3" has only two transmitter sites and
-# differs from "chan" in frequency more than in geometry.
-CIVI_DT_2 = ("CIVI-DT-2", 49.354444, -122.958333, 3420.0, 491e6)  # 957.7 m + 84.7 m = 1042.4 m
-CHNU_DT = ("CHNU-DT", 49.354444, -122.958333, 3420.0, 533e6)
-TOWER_SETS = {"chan": (CHAN_DT,), "yvr3": (CHAN_DT, CIVI_DT_2, CHNU_DT)}
+# "yvr3" is three transmitters on three separate sites, so a multinode solve
+# gets geometric spread from the towers as well as the receivers.  Every UHF
+# station on Mt Seymour (CHAN included, 1.5 km from the rest) lies in one
+# direction from the west side, so the other two come from across the water:
+# CHEK-DT to the south and KVOS to the south-southeast, about 25 km apart.
+# The low-power Fraser Valley rebroadcasters (CFEG, CHAN-DT-1, under 0.5 kW)
+# would add an eastern bearing but illuminate ~30 dB less, so they are left out.
+# Centre frequency of the RF channel.
+CBUT_DT = ("CBUT-DT", 49.353611, -122.956389, 3453.0, 599e6)  # RF 35; 967.7 m + 84.7 m = 1052.4 m
+# Mt Warburton Pike, Saturna Island.  Altitude is approximate (summit ~497 m
+# plus an assumed ~30 m mast); the digital ERP was not found, only the analog
+# facility's 16.4 kW.
+CHEK_DT = ("CHEK-DT", 48.774444, -123.171111, 1730.0, 485e6)  # RF 16
+# Mt Constitution, Orcas Island (US).  FCC CDBS: 370 kW ERP, 817.1 m AMSL.
+KVOS_TV = ("KVOS-TV", 48.680556, -122.839361, 2681.0, 473e6)  # RF 14
+TOWER_SETS = {"chan": (CHAN_DT,), "yvr3": (CBUT_DT, CHEK_DT, KVOS_TV)}
 DEFAULT_CENTER = (49.26, -123.25)  # Vancouver west side (example receiver area)
 # Nodes sit 3-15 km from the centre, cycling through these radii.
 NODE_RADII_KM = (6.0, 12.0, 4.0, 15.0, 9.0, 3.0)
@@ -533,7 +543,7 @@ def parse_args(argv=None):
         "--tower-set",
         choices=tuple(TOWER_SETS),
         default="chan",
-        help="chan: every node uses CHAN-DT. yvr3: node i uses tower i mod 3 of CHAN-DT, CIVI-DT-2, CHNU-DT",
+        help="chan: every node uses CHAN-DT. yvr3: node i uses tower i mod 3 of CBUT-DT, CHEK-DT, KVOS-TV",
     )
     p.add_argument("--out", help="write the per-window rows here as Parquet (e.g. data/classification.parquet)")
     p.add_argument(

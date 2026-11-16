@@ -30,9 +30,10 @@ The Parquet file is not committed (`backend/data/*.parquet` is gitignored).
 - **Geometry.** One illuminator for every node (`--tower-set chan`: CHAN-DT, 521 MHz). The tower
   altitude (2135 ft) assumes the tower table's columns are site elevation plus antenna height
   above ground. Receivers are an example Vancouver west-side area, 3-15 km from the centre, not a
-  surveyed site. `--tower-set yvr3` (CHAN-DT, CIVI-DT-2, CHNU-DT) is the planned three-node setup;
-  CIVI-DT-2 and CHNU-DT share Mt Seymour's main site, so it has two transmitter sites and differs
-  from `chan` more in frequency than in geometry. It was not run here.
+  surveyed site. `--tower-set yvr3` is the planned three-node setup. When this run was made it
+  named CHAN-DT, CIVI-DT-2 and CHNU-DT, which are only two sites; it now names CBUT-DT
+  (Mt Seymour), CHEK-DT (Saturna Island) and KVOS-TV (Mt Constitution), three separate sites.
+  It was not run here.
 - **Motion baseline inputs.** A window is read as a multinode trail only with at least 3 matched
   solves spanning 10 s; otherwise from the largest Doppler speed floor in the window. Most rows are
   the latter (no altitude), so the altitude bands are mostly `unknown`.

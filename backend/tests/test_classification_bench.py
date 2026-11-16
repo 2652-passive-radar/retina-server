@@ -41,7 +41,7 @@ def test_tower_sets_assign_each_node_its_towers_carrier():
     nodes = classification_bench._ring_nodes(
         args.nodes, args.center, classification_bench.TOWER_SETS["yvr3"], args.fc_hz, args.doppler_window
     )
-    assert [n.fc_hz for n in nodes] == [521e6, 491e6, 533e6, 521e6]
+    assert [n.fc_hz for n in nodes] == [599e6, 485e6, 473e6, 599e6]
     chan = classification_bench._ring_nodes(3, args.center, classification_bench.TOWER_SETS["chan"], None, 1000.0)
     assert {n.fc_hz for n in chan} == {521e6}
     override = classification_bench._ring_nodes(2, args.center, classification_bench.TOWER_SETS["chan"], 500e6, 1000.0)
