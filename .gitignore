@@ -73,3 +73,6 @@ backend/data/runtime/
 
 # Planning scratch: kept locally, never published
 docs/superpowers/
+
+# Classification bench exports (scripts/classification_bench.py --out)
+backend/data/*.parquet

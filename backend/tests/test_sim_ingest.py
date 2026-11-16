@@ -139,6 +139,17 @@ class TestStationaryPush:
         assert len(trail) == 1  # geometry unchanged — no duplicate point
         assert trail[-1][3] == round((self.T0_MS + 2000) / 1000.0, 1)
 
+    def test_airframe_and_source_are_stored(self, client):
+        client.post(
+            "/api/test/ground-truth/push",
+            headers=_KEY,
+            json={"ts_ms": self.T0_MS, "aircraft": [_ac(airframe="turboprop"), _ac(hex="D4E5F6", source="live")]},
+        )
+        assert state.ground_truth_meta["a1b2c3"]["airframe"] == "turboprop"
+        assert state.ground_truth_meta["a1b2c3"]["source"] == "sim"
+        assert state.ground_truth_meta["d4e5f6"]["airframe"] is None
+        assert state.ground_truth_meta["d4e5f6"]["source"] == "live"
+
     def test_meta_and_anomaly_update_while_stationary(self, client):
         client.post("/api/test/ground-truth/push", headers=_KEY, json={"ts_ms": self.T0_MS, "aircraft": [_ac()]})
         client.post(

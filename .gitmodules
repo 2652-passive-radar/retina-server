@@ -9,7 +9,7 @@
 	url = https://github.com/offworldlabs/retina-custody.git
 [submodule "libs/retina-simulation"]
 	path = libs/retina-simulation
-        url = https://github.com/offworldlabs/retina-simulation.git
+	url = https://github.com/2652-passive-radar/retina-simulation.git
 [submodule "libs/retina-analytics"]
 	path = libs/retina-analytics
 	url = https://github.com/offworldlabs/retina-analytics.git
