@@ -182,23 +182,34 @@ class Result:
     nodes: dict = field(default_factory=dict)
 
 
-def _ring_nodes(n_nodes, center, towers, fc_hz_override, doppler_window):
+def _ring_nodes(n_nodes, center, towers, fc_hz_override, doppler_window, colocated=False, rx_alt_ft=100.0):
+    """One node per tower in turn, on a ring around ``center`` or all at it.
+
+    ``colocated`` puts every receiver at ``center``: one rooftop with a node per
+    illuminator, which is how a single-site deployment is built.  Its beams are
+    left to the simulator's broadside default, since there is no metro core to
+    aim at from inside it, and its multinode geometry comes from the towers
+    alone.
+    """
     lat0, lon0 = center
     nodes = []
     for i in range(n_nodes):
         _, tx_lat, tx_lon, tx_alt_ft, tower_fc = towers[i % len(towers)]
-        ring_km = NODE_RADII_KM[i % len(NODE_RADII_KM)]
-        brg = 2.0 * math.pi * i / n_nodes
-        lat = lat0 + math.degrees(ring_km * math.cos(brg) / 6371.0)
-        lon = lon0 + math.degrees(ring_km * math.sin(brg) / (6371.0 * math.cos(math.radians(lat0))))
-        # Aimed at the metro core, so every beam overlaps over the traffic.
-        aim = (math.degrees(brg) + 180.0) % 360.0
+        if colocated:
+            lat, lon, aim = lat0, lon0, None
+        else:
+            ring_km = NODE_RADII_KM[i % len(NODE_RADII_KM)]
+            brg = 2.0 * math.pi * i / n_nodes
+            lat = lat0 + math.degrees(ring_km * math.cos(brg) / 6371.0)
+            lon = lon0 + math.degrees(ring_km * math.sin(brg) / (6371.0 * math.cos(math.radians(lat0))))
+            # Aimed at the metro core, so every beam overlaps over the traffic.
+            aim = (math.degrees(brg) + 180.0) % 360.0
         nodes.append(
             NodeConfig(
                 node_id=f"cls-{i:02d}",
                 rx_lat=lat,
                 rx_lon=lon,
-                rx_alt_ft=100.0,
+                rx_alt_ft=rx_alt_ft,
                 tx_lat=tx_lat,
                 tx_lon=tx_lon,
                 tx_alt_ft=tx_alt_ft,
@@ -216,7 +227,15 @@ def _ring_nodes(n_nodes, center, towers, fc_hz_override, doppler_window):
 def build_world(args) -> SimulationWorld:
     mix = parse_airframe_mix(args.airframe_mix)
     world = SimulationWorld(center_lat=args.center[0], center_lon=args.center[1])
-    for nc in _ring_nodes(args.nodes, args.center, TOWER_SETS[args.tower_set], args.fc_hz, args.doppler_window):
+    for nc in _ring_nodes(
+        args.nodes,
+        args.center,
+        TOWER_SETS[args.tower_set],
+        args.fc_hz,
+        args.doppler_window,
+        colocated=args.layout == "colocated",
+        rx_alt_ft=args.rx_alt_ft,
+    ):
         world.add_node(nc)
     world.metro_cells = [MetroCell(core_lat=args.center[0], core_lon=args.center[1], radius_km=METRO_RADIUS_KM)]
     world.frac_metro_traffic = 1.0
@@ -457,8 +476,9 @@ def report(res: Result, args, command: str) -> None:
     print("classification bench")
     print(f"command: {command}")
     print(
-        f"scene: {args.nodes} nodes 3-15 km from {args.center[0]},{args.center[1]} (Vancouver west side, example "
-        f"receiver area), {args.duration_s:.0f}s, seed {args.seed}, doppler +/-{args.doppler_window:.0f} Hz, "
+        f"scene: {args.nodes} nodes "
+        f"{'co-located at' if args.layout == 'colocated' else '3-15 km from'} {args.center[0]},{args.center[1]}, "
+        f"{args.duration_s:.0f}s, seed {args.seed}, doppler +/-{args.doppler_window:.0f} Hz, "
         f"cpi={args.cpi_s}s, micro-doppler={'on' if args.micro_doppler else 'off'}, snr-model={args.snr_model}, "
         f"{'blind' if args.blind else 'ADS-B tagged'}, mix={args.airframe_mix}"
     )
@@ -545,6 +565,13 @@ def parse_args(argv=None):
         default="chan",
         help="chan: every node uses CHAN-DT. yvr3: node i uses tower i mod 3 of CBUT-DT, CHEK-DT, KVOS-TV",
     )
+    p.add_argument(
+        "--layout",
+        choices=("ring", "colocated"),
+        default="ring",
+        help="ring: nodes 3-15 km around --center. colocated: every node at --center (one rooftop)",
+    )
+    p.add_argument("--rx-alt-ft", type=float, default=100.0, help="receiver altitude, ft above sea level")
     p.add_argument("--out", help="write the per-window rows here as Parquet (e.g. data/classification.parquet)")
     p.add_argument(
         "--tagged",

@@ -46,3 +46,12 @@ def test_tower_sets_assign_each_node_its_towers_carrier():
     assert {n.fc_hz for n in chan} == {521e6}
     override = classification_bench._ring_nodes(2, args.center, classification_bench.TOWER_SETS["chan"], 500e6, 1000.0)
     assert {n.fc_hz for n in override} == {500e6}
+
+
+def test_colocated_layout_puts_every_node_on_one_rooftop():
+    centre = (49.26, -123.25)
+    nodes = classification_bench._ring_nodes(
+        3, centre, classification_bench.TOWER_SETS["yvr3"], None, 1000.0, colocated=True, rx_alt_ft=330.0
+    )
+    assert {(n.rx_lat, n.rx_lon, n.rx_alt_ft) for n in nodes} == {(49.26, -123.25, 330.0)}
+    assert len({(n.tx_lat, n.tx_lon) for n in nodes}) == 3
