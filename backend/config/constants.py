@@ -394,6 +394,8 @@ ARCHIVE_BATCH_MAX = 10000  # Safety cap; should not normally trigger
 # above; a node that is still connected keeps its data indefinitely regardless.
 ARCHIVE_BUFFER_FAIL_TTL_S = float(os.getenv("ARCHIVE_BUFFER_FAIL_TTL_S", "21600"))
 TRACK_ARCHIVE_FLUSH_INTERVAL_S = 60  # Multi-node solver track archive flush cadence
+# Classification archive (services.classification_archive): its unit is an hourly file.
+CLASSIFICATION_ARCHIVE_FLUSH_INTERVAL_S = 3600
 
 # ── Detection mirror (production forwards accepted v1 frames elsewhere) ──────
 DETECTION_MIRROR_FLUSH_INTERVAL_S = 1.0  # One batched POST per second

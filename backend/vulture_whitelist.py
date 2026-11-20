@@ -239,3 +239,9 @@ _.dispatch
 # services/aircraft_db.py: sqlite3 reads a connection's row_factory itself when
 # building each row, which is what lets dict(row) name the columns.
 _.row_factory
+
+# services/classification_columns.py: shared with the classification bench and
+# report under scripts/, which the dead-code gate does not scan.
+GEOMETRY_COLUMNS
+motion_row
+write_parquet

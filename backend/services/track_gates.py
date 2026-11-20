@@ -19,6 +19,7 @@ from config.constants import (
 )
 from core import state
 from services.calibration import record_adsb_calibration
+from services.comb_features import compact_summary as compact_comb_summary
 from services.feed_helpers import (
     _estimate_velocity_from_motion,
     _record_arc_motion,
@@ -835,6 +836,8 @@ def track_entry(ac_hex, track, node_cfg, now: float, touched_arc_keys: set):
     # the trail is honest point by point and the newest point still lands
     # exactly on the arc drawn beside it.  Nothing here reads the true store.
     _recent_positions = list(state.track_histories_public.get(ac_hex, []))
+    _comb_fn = getattr(track, "comb_summary", None)
+    _comb_full = _comb_fn() if _comb_fn is not None else None
 
     return {
         "hex": ac_hex,
@@ -890,4 +893,10 @@ def track_entry(ac_hex, track, node_cfg, now: float, touched_arc_keys: set):
         # Debug only, never an anomaly: a teleporting emit means the solver
         # mis-associated, not that the target did anything.
         "position_jump": _position_jump,
+        # Rotor lines seen beside this track's body detection (services.comb_features),
+        # None until it has a frame.  The full summary rides under a private key for
+        # the classification archive, and classify_feed removes it before the feed
+        # leaves the builder.
+        "comb": compact_comb_summary(_comb_full),
+        "_comb_full": _comb_full,
     }

@@ -32,6 +32,8 @@ def test_short_run_writes_the_expected_dataset(tmp_path, capsys):
         assert any(r["airframe"] == airframe for r in rows)
     assert all(r["window_start_s"] % classification_bench.WINDOW_S == 0 for r in rows)
     printed = capsys.readouterr().out
+    assert "spurious confirmed tracks per hour:" in printed
+    assert classification_bench.spurious_tracks(res)["confirmed"] == len(res.tracks)
     assert "tower 49.345000,-122.972778" in printed
     assert "motion baseline vs simulator truth" in printed
 
@@ -55,3 +57,21 @@ def test_colocated_layout_puts_every_node_on_one_rooftop():
     )
     assert {(n.rx_lat, n.rx_lon, n.rx_alt_ft) for n in nodes} == {(49.26, -123.25, 330.0)}
     assert len({(n.tx_lat, n.tx_lon) for n in nodes}) == 3
+
+
+def test_spurious_tracks_counts_confirmed_tracks_that_never_sat_on_a_target():
+    res = classification_bench.Result(duration_s=1800.0)
+    audit = classification_bench.TrackAudit
+    res.tracks = {
+        ("n0", "a"): audit(frames=9, matched=True),
+        ("n0", "b"): audit(frames=5, beside_body=True),
+        ("n1", "c"): audit(frames=4),
+        ("n1", "d"): audit(frames=7, matched=True, beside_body=True),
+    }
+    assert classification_bench.spurious_tracks(res) == {
+        "confirmed": 4,
+        "spurious": 2,
+        "beside_body": 1,
+        "per_hour": 4.0,
+    }
+    assert classification_bench.spurious_tracks(classification_bench.Result())["per_hour"] is None

@@ -1178,6 +1178,13 @@ position_jump_events: int = 0
 # published without its fields rather than taking the broadcast down.
 target_classification_errors: int = 0
 
+# Frames whose per-track comb features failed to compute (passive_radar's
+# _update_combs), and aircraft-feed entries the classification archive failed to
+# record (services.classification_archive).  Both are enrichment: the frame and
+# the broadcast go on without it.
+comb_feature_errors: int = 0
+classification_archive_errors: int = 0
+
 # Sim ADS-B pushes dropped for a non-transponder hex (e.g. a simulator object
 # id standing in for a transponder).  A nonzero value means an outdated fleet
 # is still pushing dark aircraft into the ADS-B path — see routes/sim_ingest.

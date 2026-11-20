@@ -77,6 +77,28 @@ class TestCloudflareAccessEntries:
         assert not parity.allowed("services.server.environment.AUTH_ALLOW_ANONYMOUS_ADMIN", env)
 
 
+class TestAircraftRegistry:
+    """Production and staging both download the aircraft registry; only the test droplet may not.
+
+    Real nodes report to production, so a registry left off there leaves their
+    traffic unlabelled and the classification scorecard empty. The entry must
+    stay scoped to the test droplet: widened, it would let production lose the
+    flag with the check still green.
+    """
+
+    path = "services.server.environment.AIRCRAFT_DB_ENABLED"
+
+    def test_the_test_droplet_may_leave_it_off(self, parity):
+        assert parity.allowed(self.path, "test")
+
+    def test_staging_may_not_differ_from_production(self, parity):
+        assert not parity.allowed(self.path, "staging")
+
+    def test_production_sets_it(self):
+        compose = (_SCRIPT.parents[1] / "docker-compose.prod.yml").read_text()
+        assert "      - AIRCRAFT_DB_ENABLED=1\n" in compose
+
+
 class TestScopeValidation:
     def test_unknown_environment_is_rejected(self, parity):
         with pytest.raises(SystemExit):

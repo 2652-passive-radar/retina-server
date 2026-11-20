@@ -212,6 +212,15 @@ def dedup_aircraft(aircraft: list[dict]) -> list[dict]:
                         nodes.append(nid)
             if nodes:
                 winner["contributing_node_ids"] = nodes
+            # A multinode solve has no tracker track behind it, so the comb a
+            # node read off its own detections would be lost with the arc entry
+            # it was on.  Keep the one backed by the most frames.
+            if not winner.get("comb"):
+                combed = [m for m in members if m.get("comb")]
+                if combed:
+                    best = max(combed, key=lambda m: m["comb"].get("frames") or 0)
+                    winner["comb"] = best["comb"]
+                    winner["_comb_full"] = best.get("_comb_full")
             out.append(winner)
 
     return out

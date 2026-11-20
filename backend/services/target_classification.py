@@ -38,7 +38,7 @@ import time
 from collections import OrderedDict
 
 from core import state
-from services import motion_classifier
+from services import classification_archive, motion_classifier
 from services.id_utils import is_transponder_hex, normalize_hex_key
 from services.node_config import carrier_hz
 from services.target_identity import TARGET_CLASSES, identify, target_class_for
@@ -187,9 +187,13 @@ def _sim_truth_class(entry: dict) -> tuple[str, str] | None:
     return (gt_hex, airframe) if airframe in TARGET_CLASSES else None
 
 
-def classify_entry(entry: dict, now: float | None = None) -> dict:
-    """Annotate one feed entry in place with ``identity`` and ``motion_class``."""
-    now = time.time() if now is None else now
+def _classify(entry: dict, now: float) -> tuple[str, str, str] | None:
+    """Annotate one entry in place; returns the label it was scored under, if any.
+
+    The label is ``(key, class, label_source)``: the hex the pair was recorded
+    against (the transponder's, or the simulator's ground-truth hex), the class
+    that is ground truth for the motion verdict, and where it came from.
+    """
     hex_code = _identity_hex(entry)
     identity = None
     if hex_code is not None:
@@ -204,10 +208,17 @@ def classify_entry(entry: dict, now: float | None = None) -> dict:
             entry["target_class"] = legacy
         if identity.get("class") in TARGET_CLASSES:
             _record(hex_code, identity["class"], motion.cls, motion.confidence, now, motion.features.alt_m)
-            return entry
+            return hex_code, identity["class"], LABEL_HEX
     sim_truth = _sim_truth_class(entry)
     if sim_truth is not None:
         _record(sim_truth[0], sim_truth[1], motion.cls, motion.confidence, now, motion.features.alt_m, LABEL_SIM_TRUTH)
+        return sim_truth[0], sim_truth[1], LABEL_SIM_TRUTH
+    return None
+
+
+def classify_entry(entry: dict, now: float | None = None) -> dict:
+    """Annotate one feed entry in place with ``identity`` and ``motion_class``."""
+    _classify(entry, time.time() if now is None else now)
     return entry
 
 
@@ -216,15 +227,35 @@ def classify_feed(aircraft: list[dict], now: float | None = None) -> list[dict]:
 
     Classification is enrichment, so it must never cost the broadcast the way
     an exception escaping the feed build would (see aircraft_feed's
-    _note_multinode_entry_failure for the same rule).
+    _note_multinode_entry_failure for the same rule).  The classification
+    archive (services.classification_archive) is held to the same rule: it sees
+    each entry after its annotation, and a failure there is counted and
+    forgotten.
+
+    Entries may carry ``_comb_full``, the full rotor-line summary
+    track_gates.track_entry attaches for the archive.  It is private, and is
+    removed here, last, because this is the end of the feed build.
     """
     now = time.time() if now is None else now
+    try:
+        classification_archive.close_expired(now)
+    except Exception:
+        state.bump_counter("classification_archive_errors")
+        log.debug("classification archive sweep failed", exc_info=True)
     for entry in aircraft:
+        label = None
         try:
-            classify_entry(entry, now)
+            label = _classify(entry, now)
         except Exception:
             state.bump_counter("target_classification_errors")
             log.debug("classification failed for %s", entry.get("hex"), exc_info=True)
+        else:
+            try:
+                classification_archive.observe(entry, label, now)
+            except Exception:
+                state.bump_counter("classification_archive_errors")
+                log.debug("classification archive failed for %s", entry.get("hex"), exc_info=True)
+        entry.pop("_comb_full", None)
     return aircraft
 
 

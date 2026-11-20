@@ -47,13 +47,11 @@ import random
 import statistics
 import sys
 import time
-from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pyarrow as pa  # noqa: E402
-import pyarrow.parquet as pq  # noqa: E402
 from retina_analytics.association import predict_observation  # noqa: E402
 from retina_analytics.detection_association import DetectionAssociator  # noqa: E402
 from retina_geolocator.multinode_solver import fit_constant_velocity, solve_multinode  # noqa: E402
@@ -68,6 +66,12 @@ from scripts.association_bench import (  # noqa: E402
     _frame_to_detections,
     _strip_adsb,
 )
+from scripts.classification_report import (  # noqa: E402
+    print_card,
+    print_comb_tables,
+    vote_per_target,
+)
+from services import classification_columns as cols  # noqa: E402
 from services import motion_classifier, target_classification  # noqa: E402
 from services.comb_features import CombAccumulator, frame_comb  # noqa: E402
 from services.frame_processor import confirmed_track_views  # noqa: E402
@@ -98,7 +102,7 @@ TOWER_SETS = {"chan": (CHAN_DT,), "yvr3": (CBUT_DT, CHEK_DT, KVOS_TV)}
 DEFAULT_CENTER = (49.26, -123.25)  # Vancouver west side (example receiver area)
 # Nodes sit 3-15 km from the centre, cycling through these radii.
 NODE_RADII_KM = (6.0, 12.0, 4.0, 15.0, 9.0, 3.0)
-WINDOW_S = 60.0
+WINDOW_S = cols.WINDOW_S
 # A solved trail shorter than this in a window is not motion: the single-node
 # path (Doppler floor alone) is used instead.
 MIN_TRAIL_POINTS = 3
@@ -108,21 +112,10 @@ BODY_DELAY_GATE_US = 1.0
 BODY_DOPPLER_GATE_HZ = 10.0
 METRO_RADIUS_KM = 60.0
 
-# Expected comb spacing by class from micro_doppler.AIRFRAMES: the strongest
-# rotor's blades x rev/s.  Printed beside the measured medians.
-EXPECTED_SPACING_HZ = {"jet": None, "turboprop": 102.0, "piston": 90.0, "helicopter": 13.6, "drone": 180.0}
-
-COMB_COLUMNS = (
-    "comb_frames",
-    "comb_frac_frames",
-    "comb_median_n_lines",
-    "comb_max_n_lines",
-    "comb_median_spacing_hz",
-    "comb_spacing_spread_hz",
-    "comb_median_max_offset_hz",
-    "comb_median_symmetry",
-    "comb_median_rel_snr_db",
-)
+COMB_COLUMNS = cols.COMB_COLUMNS
+# The columns that mean the same in the live archive come from services.classification_columns,
+# so the report reads both files by one set of names.  object_id, airframe and the has_adsb /
+# object_type / n_solves / truth_* columns are the simulator's own.
 COLUMNS: dict[str, pa.DataType] = {
     "object_id": pa.string(),
     "window_start_s": pa.float64(),
@@ -130,19 +123,9 @@ COLUMNS: dict[str, pa.DataType] = {
     "object_type": pa.string(),
     "has_adsb": pa.bool_(),
     "motion_source": pa.string(),
-    "span_s": pa.float64(),
-    "n_chords": pa.int64(),
-    "speed_ms": pa.float64(),
-    "max_speed_ms": pa.float64(),
-    "speed_floor_ms": pa.float64(),
-    "alt_m": pa.float64(),
-    "turn_dps": pa.float64(),
-    "climb_ms": pa.float64(),
-    "hover_fraction": pa.float64(),
-    "baseline_class": pa.string(),
-    "baseline_confidence": pa.float64(),
-    **{f"baseline_score_{c}": pa.float64() for c in TARGET_CLASSES},
-    **{c: pa.float64() for c in COMB_COLUMNS},
+    **cols.MOTION_COLUMNS,
+    **cols.BASELINE_COLUMNS,
+    **cols.COMB_TYPES,
     "n_nodes": pa.int64(),
     "node_ids": pa.string(),
     "n_solves": pa.int64(),
@@ -151,6 +134,7 @@ COLUMNS: dict[str, pa.DataType] = {
     "median_body_snr_db": pa.float64(),
     "n_frames": pa.int64(),
 }
+assert set(cols.MOTION_COLUMNS) | set(cols.GEOMETRY_COLUMNS) <= set(COLUMNS)
 
 
 def _median(values):
@@ -173,13 +157,32 @@ class Target:
 
 
 @dataclass
+class TrackAudit:
+    """Whether a confirmed tracker track ever sat on a real target.
+
+    ``matched`` is set when one of its measurements fell inside the body gates
+    of a target's true observation.  ``beside_body`` is set when one fell
+    inside the delay gate of a target but outside its Doppler gate: that is
+    where a rotor line sits, so a track with only that is the signature of the
+    tracker locking onto a comb line.
+    """
+
+    frames: int = 0
+    matched: bool = False
+    beside_body: bool = False
+
+
+@dataclass
 class Result:
     targets: dict[str, Target] = field(default_factory=dict)
     rows: list[dict] = field(default_factory=list)
     frames: int = 0
     solves: int = 0
     wall_s: float = 0.0
+    duration_s: float = 0.0
     nodes: dict = field(default_factory=dict)
+    # (node_id, track id) -> TrackAudit, for every track the tracker confirmed.
+    tracks: dict = field(default_factory=dict)
 
 
 def _ring_nodes(n_nodes, center, towers, fc_hz_override, doppler_window, colocated=False, rx_alt_ft=100.0):
@@ -307,10 +310,12 @@ def run(args) -> Result:
             next_send[nid] += args.frame_interval
             frame = world.generate_detections_for_node(nid, ts_ms)
             res.frames += 1
-            _collect_sightings(res, world, assoc, nid, frame, t, bin_hz)
+            expected = _expected_observations(world, assoc.node_geometries[nid]) if frame["delay"] else []
+            _collect_sightings(res, expected, nid, frame, t, bin_hz)
             if args.blind:
                 frame = _strip_adsb(frame)
             trackers[nid].process_frame(_frame_to_detections(frame), ts_ms)
+            _audit_tracks(res, trackers[nid], nid, expected)
             assoc._pending_tracks[nid] = confirmed_track_views(trackers[nid], 20, ts_ms)
             if (t - last_assoc.get(nid, -1e9)) < args.assoc_interval:
                 continue
@@ -332,19 +337,27 @@ def run(args) -> Result:
                 if d <= MATCH_KM and oid in res.targets:
                     res.targets[oid].solves.append((t, out["lat"], out["lon"], out.get("alt_m")))
                     res.solves += 1
+    res.duration_s = t
     res.rows = build_rows(res, node_cfgs, args.min_frames)
     res.wall_s = time.perf_counter() - t_wall
     return res
 
 
-def _collect_sightings(res, world, assoc, nid, frame, t, bin_hz):
-    if not frame["delay"]:
-        return
-    geo = assoc.node_geometries[nid]
-    for ac in world.aircraft:
-        d_us, f_hz = predict_observation(
-            geo, ac.lat, ac.lon, ac.alt_km, ac.vel_east * 1000.0, ac.vel_north * 1000.0, ac.vel_up * 1000.0
+def _expected_observations(world, geo):
+    """Each aircraft's noiseless (delay us, Doppler Hz) at a node, as ``(aircraft, d, f)``."""
+    return [
+        (
+            ac,
+            *predict_observation(
+                geo, ac.lat, ac.lon, ac.alt_km, ac.vel_east * 1000.0, ac.vel_north * 1000.0, ac.vel_up * 1000.0
+            ),
         )
+        for ac in world.aircraft
+    ]
+
+
+def _collect_sightings(res, expected, nid, frame, t, bin_hz):
+    for ac, d_us, f_hz in expected:
         i = _body_detection(frame, d_us, f_hz)
         if i is None:
             continue
@@ -355,6 +368,37 @@ def _collect_sightings(res, world, assoc, nid, frame, t, bin_hz):
             frame["delay"], frame["doppler"], frame["snr"], frame["delay"][i], frame["doppler"][i], bin_hz=bin_hz
         )
         tgt.sightings.append((t, nid, frame["snr"][i], frame["doppler"][i], ac.alt_km * 1000.0, obs))
+
+
+def _audit_tracks(res, tracker, nid, expected):
+    """Record, for every confirmed track updated this frame, whether it sits on a target."""
+    for track in tracker.tracks:
+        if track.id is None or track.history["frames"][-1] != tracker.frame_count:
+            continue
+        m = track.history["measurements"][-1]
+        if m is None:
+            continue
+        audit = res.tracks.setdefault((nid, track.id), TrackAudit())
+        audit.frames += 1
+        for _, d_us, f_hz in expected:
+            if abs(m["delay"] - d_us) > BODY_DELAY_GATE_US:
+                continue
+            if abs(m["doppler"] - f_hz) <= BODY_DOPPLER_GATE_HZ:
+                audit.matched = True
+                break
+            audit.beside_body = True
+
+
+def spurious_tracks(res: Result) -> dict:
+    """Confirmed tracks that never matched a target, and the rate per hour of simulated time."""
+    spurious = [a for a in res.tracks.values() if not a.matched]
+    hours = res.duration_s / 3600.0
+    return {
+        "confirmed": len(res.tracks),
+        "spurious": len(spurious),
+        "beside_body": sum(1 for a in spurious if a.beside_body),
+        "per_hour": round(len(spurious) / hours, 1) if hours > 0 else None,
+    }
 
 
 def _motion_for_window(tgt, t0, t1, node_cfgs):
@@ -386,7 +430,6 @@ def build_rows(res, node_cfgs, min_frames) -> list[dict]:
             for s in seen:
                 acc.add(s[5])
             comb = acc.summary()
-            f = motion.features
             solved = [alt for ts, _, _, alt in tgt.solves if w0 <= ts < w0 + WINDOW_S and alt is not None]
             row = {
                 "object_id": tgt.object_id,
@@ -395,27 +438,8 @@ def build_rows(res, node_cfgs, min_frames) -> list[dict]:
                 "object_type": tgt.object_type,
                 "has_adsb": bool(tgt.has_adsb),
                 "motion_source": source,
-                "span_s": f.span_s,
-                "n_chords": f.n_chords,
-                "speed_ms": f.speed_ms,
-                "max_speed_ms": f.max_speed_ms,
-                "speed_floor_ms": f.speed_floor_ms,
-                "alt_m": f.alt_m,
-                "turn_dps": f.turn_dps,
-                "climb_ms": f.climb_ms,
-                "hover_fraction": f.hover_fraction,
-                "baseline_class": motion.cls,
-                "baseline_confidence": motion.confidence,
-                **{f"baseline_score_{c}": motion.scores.get(c) for c in TARGET_CLASSES},
-                "comb_frames": comb["frames"],
-                "comb_frac_frames": comb["frac_frames_with_comb"],
-                "comb_median_n_lines": comb["median_n_lines"],
-                "comb_max_n_lines": comb["max_n_lines"],
-                "comb_median_spacing_hz": comb["median_spacing_hz"],
-                "comb_spacing_spread_hz": comb["spacing_spread_hz"],
-                "comb_median_max_offset_hz": comb["median_max_offset_hz"],
-                "comb_median_symmetry": comb["median_symmetry"],
-                "comb_median_rel_snr_db": comb["median_rel_snr_db"],
+                **cols.motion_row(motion),
+                **cols.comb_row(comb),
                 "n_nodes": len({s[1] for s in seen}),
                 "node_ids": ",".join(sorted({s[1] for s in seen})),
                 "n_solves": len(solved),
@@ -429,46 +453,7 @@ def build_rows(res, node_cfgs, min_frames) -> list[dict]:
 
 
 def write_parquet(rows, path) -> None:
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    schema = pa.schema(list(COLUMNS.items()))
-    pq.write_table(pa.Table.from_pylist(rows, schema=schema), path)
-
-
-def _fmt(x, nd=1):
-    return "-" if x is None else f"{x:.{nd}f}"
-
-
-def _vote_per_aircraft(rows):
-    """One (truth, verdict, alt) per aircraft: its most common decided verdict, unknown on a tie."""
-    by = defaultdict(list)
-    for r in rows:
-        by[r["object_id"]].append(r)
-    out = []
-    for rs in by.values():
-        counts = Counter(r["baseline_class"] for r in rs if r["baseline_class"] != motion_classifier.UNKNOWN)
-        top = counts.most_common(2)
-        verdict = top[0][0] if top and (len(top) == 1 or top[0][1] > top[1][1]) else motion_classifier.UNKNOWN
-        out.append((rs[0]["airframe"], verdict, _median([r["alt_m"] for r in rs])))
-    return out
-
-
-def _print_card(title, card):
-    print(f"\n{title}")
-    print(
-        f"  targets={card['targets']} decided={card['decided']} accuracy={card['accuracy']} coverage={card['coverage']}"
-    )
-    labels = list(TARGET_CLASSES) + [motion_classifier.UNKNOWN]
-    print("  truth \\ predicted  " + "".join(f"{p:>11}" for p in labels))
-    for truth in TARGET_CLASSES:
-        print(f"  {truth:<18}" + "".join(f"{card['confusion'][truth][p]:>11}" for p in labels))
-    print(
-        "  per class: "
-        + "  ".join(f"{c}: recall={v['recall']} precision={v['precision']}" for c, v in card["per_class"].items())
-    )
-    print(
-        "  by altitude band (targets / decided / accuracy): "
-        + "; ".join(f"{b}: {v['targets']}/{v['decided']}/{v['accuracy']}" for b, v in card["by_altitude"].items())
-    )
+    cols.write_parquet(rows, path, COLUMNS)
 
 
 def report(res: Result, args, command: str) -> None:
@@ -489,6 +474,13 @@ def report(res: Result, args, command: str) -> None:
         )
     print(f"towers: --tower-set {args.tower_set}")
     print(f"ran {res.frames} frames, {res.solves} solves matched to a target in {res.wall_s:.0f}s wall")
+    sp = spurious_tracks(res)
+    print(
+        f"spurious confirmed tracks per hour: {sp['per_hour']} "
+        f"({sp['spurious']} of {sp['confirmed']} confirmed tracker tracks, all nodes, never inside a target's "
+        f"{BODY_DELAY_GATE_US:.0f} us / {BODY_DOPPLER_GATE_HZ:.0f} Hz body gate; "
+        f"{sp['beside_body']} of them sat at a target's delay but off its Doppler, where rotor lines are)"
+    )
     print("\nrows and targets per class (truth airframe)")
     print(f"  {'class':<12}{'targets':>9}{'rows':>7}{'rows from multinode solves':>30}")
     for c in TARGET_CLASSES:
@@ -501,39 +493,15 @@ def report(res: Result, args, command: str) -> None:
     if not rows:
         print("no rows: nothing was seen for min-frames frames in a window")
         return
-    _print_card(
+    print_card(
         f"motion baseline vs simulator truth, per row (window) [{len(rows)} rows]",
         target_classification.build_card([(r["airframe"], r["baseline_class"], r["alt_m"]) for r in rows]),
     )
-    _print_card(
+    print_card(
         "motion baseline vs simulator truth, one vote per aircraft",
-        target_classification.build_card(_vote_per_aircraft(rows)),
+        target_classification.build_card(vote_per_target(rows, group="object_id")),
     )
-    print("\ncomb features per class (rows; medians over rows that showed a comb)")
-    print(
-        f"  {'class':<12}{'rows':>6}{'comb rows':>10}{'frames w/ comb':>16}{'n_lines':>9}{'spacing Hz':>12}"
-        f"{'expected':>10}{'spread':>8}{'symmetry':>10}{'rel SNR':>9}"
-    )
-    for c in TARGET_CLASSES:
-        rs = [r for r in rows if r["airframe"] == c]
-        comb = [r for r in rs if r["comb_median_n_lines"] is not None]
-        print(
-            f"  {c:<12}{len(rs):>6}{len(comb):>10}{_fmt(_median([r['comb_frac_frames'] for r in rs]), 2):>16}"
-            f"{_fmt(_median([r['comb_median_n_lines'] for r in comb])):>9}"
-            f"{_fmt(_median([r['comb_median_spacing_hz'] for r in comb])):>12}"
-            f"{_fmt(EXPECTED_SPACING_HZ[c]):>10}"
-            f"{_fmt(_median([r['comb_spacing_spread_hz'] for r in comb])):>8}"
-            f"{_fmt(_median([r['comb_median_symmetry'] for r in comb]), 2):>10}"
-            f"{_fmt(_median([r['comb_median_rel_snr_db'] for r in comb])):>9}"
-        )
-    jt = {c: [r for r in rows if r["airframe"] == c] for c in ("jet", "turboprop")}
-    print("\njet vs turboprop: where motion cannot split them, does the comb?")
-    for c, rs in jt.items():
-        has = sum(1 for r in rs if (r["comb_median_n_lines"] or 0) >= 2)
-        print(
-            f"  {c:<10} rows={len(rs):>4}  comb of >=2 lines in {has}/{len(rs)} rows; "
-            f"baseline calls it: {dict(Counter(r['baseline_class'] for r in rs))}"
-        )
+    print_comb_tables(rows)
 
 
 def _latlon(text):

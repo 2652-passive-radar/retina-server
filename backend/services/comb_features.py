@@ -15,7 +15,8 @@ association of a body detection to a track is the tracker's job, not this
 module's.
 """
 
-from dataclasses import dataclass, field
+from collections import deque
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -56,6 +57,12 @@ class CombObs:
     # Mean line SNR minus the body's, in dB; None with no lines or no body
     # detection to reference.
     mean_rel_snr_db: float | None
+
+
+# A body with no line beside it: what frame_comb returns when nothing else sits
+# at the body's delay, and what a caller that has already checked may use
+# without calling it.
+NO_COMB = CombObs((), 0, 0.0, None, None, None)
 
 
 def _spacing_candidates() -> np.ndarray:
@@ -137,7 +144,7 @@ def frame_comb(
             body_snr = float(snrs[at_delay[nearest]])
             at_delay = np.delete(at_delay, nearest)
     if not at_delay.size:
-        return CombObs((), 0, 0.0, None, None, None)
+        return NO_COMB
     order = np.argsort(dopplers[at_delay] - body_doppler_hz)
     lines = at_delay[order]
     offsets = dopplers[lines] - body_doppler_hz
@@ -156,14 +163,22 @@ def _median(values: list[float]) -> float | None:
     return float(np.median(values)) if values else None
 
 
-@dataclass
 class CombAccumulator:
-    """A track's comb observations, frame by frame."""
+    """A track's comb observations, frame by frame.
 
-    _obs: list[CombObs] = field(default_factory=list)
+    ``max_frames`` bounds a live track's memory: a track that lives for hours
+    keeps its newest frames only, so its summary describes now rather than the
+    whole flight.  The bench leaves it unbounded, as a window is short.
+    """
 
-    def add(self, obs: CombObs) -> None:
+    def __init__(self, max_frames: int | None = None):
+        self._obs: deque[CombObs] = deque(maxlen=max_frames)
+        self._body_snr: deque[float] = deque(maxlen=max_frames)
+
+    def add(self, obs: CombObs, body_snr_db: float | None = None) -> None:
         self._obs.append(obs)
+        if body_snr_db is not None:
+            self._body_snr.append(float(body_snr_db))
 
     def summary(self) -> dict:
         """The track's comb in one dict; every statistic is None where nothing backs it.
@@ -173,13 +188,18 @@ class CombAccumulator:
         as the comb it has; ``frac_frames_with_comb`` carries that miss rate.
         ``spacing_spread_hz`` is the interquartile range of the per-frame
         spacings, so one harmonic-confused frame does not widen it.
+        ``median_body_snr_db`` is over the frames the caller gave a body SNR for.
         """
-        combs = [o for o in self._obs if o.n_lines > 0]
+        # list() of a deque is one C call, an atomic snapshot: the feed builder
+        # reads this while a frame worker is appending.
+        obs = list(self._obs)
+        body_snr = list(self._body_snr)
+        combs = [o for o in obs if o.n_lines > 0]
         spacings = [o.spacing_hz for o in combs if o.spacing_hz is not None]
         spread = float(np.percentile(spacings, 75) - np.percentile(spacings, 25)) if spacings else None
         return {
-            "frames": len(self._obs),
-            "frac_frames_with_comb": len(combs) / len(self._obs) if self._obs else 0.0,
+            "frames": len(obs),
+            "frac_frames_with_comb": len(combs) / len(obs) if obs else 0.0,
             "median_n_lines": _median([o.n_lines for o in combs]),
             "max_n_lines": max((o.n_lines for o in combs), default=0),
             "median_spacing_hz": _median(spacings),
@@ -187,4 +207,21 @@ class CombAccumulator:
             "median_max_offset_hz": _median([o.max_abs_offset_hz for o in combs]),
             "median_symmetry": _median([o.symmetry for o in combs if o.symmetry is not None]),
             "median_rel_snr_db": _median([o.mean_rel_snr_db for o in combs if o.mean_rel_snr_db is not None]),
+            "median_body_snr_db": _median(body_snr),
         }
+
+
+def compact_summary(summary: dict | None) -> dict | None:
+    """The four headline numbers of a summary, rounded for the feed; None with no frames."""
+    if not summary or not summary.get("frames"):
+        return None
+
+    def rounded(v, nd):
+        return None if v is None else round(v, nd)
+
+    return {
+        "n_lines": rounded(summary["median_n_lines"], 1),
+        "spacing_hz": rounded(summary["median_spacing_hz"], 1),
+        "frac_frames_with_comb": round(summary["frac_frames_with_comb"], 3),
+        "frames": summary["frames"],
+    }

@@ -93,6 +93,12 @@ def _cleanup_test_db() -> None:
 
 
 atexit.register(_cleanup_test_db)
+# The classification archive writes Parquet under backend/data, on every feed
+# build's window close and in the app's shutdown flush, which a module-scoped
+# TestClient runs after any per-test patch is gone.  Off for the whole run, as
+# a hard assignment for the reason RETINA_DB_PATH is one; the tests that want it
+# turn it on and point it at a tmp_path themselves.
+os.environ["CLASSIFICATION_ARCHIVE_ENABLED"] = "0"
 # The suite builds its schema with create_all rather than a migration run per
 # session. tests/test_migrations.py asserts the two agree.
 os.environ.setdefault("RETINA_SCHEMA_SOURCE", "create_all")
@@ -209,6 +215,7 @@ def _reset_module_state():
         aircraft_db,
         aircraft_feed,
         alerting,
+        classification_archive,
         dark_follow,
         feed_helpers,
         frame_processor,
@@ -246,6 +253,7 @@ def _reset_module_state():
         admin,
         aircraft_db,
         target_classification,
+        classification_archive,
     ):
         mod._reset_for_tests()
     yield

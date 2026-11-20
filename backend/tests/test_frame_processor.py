@@ -1148,3 +1148,48 @@ class TestGroundTruthGhostPruning:
         state.track_histories["ghosttrail"] = deque([[34.9, -82.4, 30000, old]])
         self._build()
         assert "ghosttrail" in state.track_histories
+
+
+class TestDedupCarriesTheComb:
+    """A multinode solve has no tracker track, so the comb a node read must survive onto it."""
+
+    def _pair(self, arc_comb, extra_arc=None):
+        arc = {
+            "hex": "abcdef",
+            "lat": 34.9,
+            "lon": -82.0,
+            "position_source": "single_node_ellipse_arc",
+            "ground_truth_hex": "t1",
+            "comb": arc_comb,
+            "_comb_full": {"frames": arc_comb["frames"]} if arc_comb else None,
+        }
+        mn = {
+            "hex": "mn0000000001",
+            "lat": 34.9,
+            "lon": -82.0,
+            "position_source": "multinode_solve",
+            "ground_truth_hex": "t1",
+        }
+        return [arc, mn] + ([extra_arc] if extra_arc else [])
+
+    def test_the_survivor_inherits_the_comb_of_the_entry_folded_into_it(self):
+        (out,) = dedup_aircraft(self._pair({"frames": 12, "n_lines": 3.0}))
+        assert out["position_source"] == "multinode_solve"
+        assert out["comb"] == {"frames": 12, "n_lines": 3.0}
+        assert out["_comb_full"] == {"frames": 12}
+
+    def test_the_comb_backed_by_the_most_frames_wins(self):
+        other = {
+            "hex": "abcdee",
+            "lat": 34.9,
+            "lon": -82.0,
+            "position_source": "single_node_ellipse_arc",
+            "ground_truth_hex": "t1",
+            "comb": {"frames": 90, "n_lines": 2.0},
+        }
+        (out,) = dedup_aircraft(self._pair({"frames": 12, "n_lines": 3.0}, other))
+        assert out["comb"]["frames"] == 90
+
+    def test_a_group_with_no_comb_gains_none(self):
+        (out,) = dedup_aircraft(self._pair(None))
+        assert not out.get("comb")
