@@ -41,7 +41,7 @@ from core.users import (
     require_admin,
     user_to_dict,
 )
-from services import aircraft_db, publication, target_classification
+from services import aircraft_db, classification_archive, publication, target_classification
 from services.node_claim_store import set_owner
 from services.node_config import carrier_hz
 from services.node_refs import id_for_ref, public_identity, public_name, ref_to_id_map
@@ -391,6 +391,7 @@ async def classification_scorecard(_admin=Depends(require_admin)):
     age = aircraft_db.age_s()
     return {
         **target_classification.scorecard(),
+        "archive": classification_archive.stats(),
         "aircraft_db": {"available": aircraft_db.available(), "age_s": round(age) if age is not None else None},
     }
 

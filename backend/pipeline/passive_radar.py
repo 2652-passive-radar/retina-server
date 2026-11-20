@@ -12,6 +12,7 @@ import os
 import threading
 import time
 
+import numpy as np
 import yaml
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,7 @@ from config.constants import (
     PRUNE_INTERVAL_S,
     as_num,
 )
+from services.comb_features import NO_COMB, CombAccumulator, frame_comb
 from services.id_utils import passive_track_hex
 from services.public_location import public_latlon
 from services.publication import is_private
@@ -240,6 +242,15 @@ class GeolocatedTrack:
         self.is_anomalous = is_anomalous
         self.anomaly_types = anomaly_types or set()
         self.max_velocity_ms = max_velocity_ms
+        # The CombAccumulator of the tracker track behind this one, set each
+        # frame by the pipeline.  Held by reference rather than summarised per
+        # frame: the summary is a handful of percentiles and is only wanted
+        # when the feed is built, about once a second.
+        self.comb_source = None
+
+    def comb_summary(self):
+        """Rotor-line summary over this track's recent frames (CombAccumulator.summary), or None."""
+        return self.comb_source.summary() if self.comb_source is not None else None
 
     @property
     def speed_knots(self):
@@ -336,6 +347,16 @@ def _apply_tracker_env_overrides(tracker_config: dict) -> dict:
 # ─── Pipeline: Detection → retina-tracker → retina-geolocator → tar1090 ────
 
 
+# Frames of comb history a track keeps.  A node sends 0.6-2 frames a second, so
+# this is a few minutes: long enough that a missed line does not move the
+# summary, short enough that a track that changes (a helicopter hovering, then
+# transiting) is read as it is now.
+COMB_HISTORY_FRAMES = 240
+# How close in delay a detection must be to a body to count as one of its
+# lines, in microseconds: the same tolerance frame_comb and the bench use.
+COMB_DELAY_TOL_US = 1.0
+
+
 class PassiveRadarPipeline:
     """Full pipeline using retina-tracker and retina-geolocator."""
 
@@ -383,6 +404,9 @@ class PassiveRadarPipeline:
 
         # Store geolocated tracks
         self.geolocated_tracks = {}  # track_id → GeolocatedTrack
+        # track_id → CombAccumulator: rotor lines seen beside the track's body
+        # detection, frame by frame (see _update_combs).
+        self._combs: dict[str, CombAccumulator] = {}
         self._previous_solutions = {}  # track_id → state vector
         # Per-track geolocation rate-limiter: solve at most once per
         # _GEO_INTERVAL_S to avoid running the expensive LM solver every
@@ -623,7 +647,7 @@ class PassiveRadarPipeline:
         _PRUNE_EVERY_N frames so the O(N) linear scan does not dominate.
         """
         live_ids = set(self.event_writer.events.keys()) | {t.id for t in self.tracker.tracks if t.id}
-        for d in (self._previous_solutions, self._geo_last_solve, self.geolocated_tracks):
+        for d in (self._previous_solutions, self._geo_last_solve, self.geolocated_tracks, self._combs):
             stale = [k for k in d if k not in live_ids]
             for k in stale:
                 del d[k]
@@ -789,6 +813,92 @@ class PassiveRadarPipeline:
                     with _state.geo_aircraft_lock:
                         _state.active_geo_aircraft[_hex_key] = (existing, self.config)
 
+    def _bin_hz(self):
+        """The node's Doppler resolution, 1 / CPI, or None where its config does not say."""
+        cpi = self.config.get("cpi_s")
+        return 1.0 / cpi if isinstance(cpi, (int, float)) and not isinstance(cpi, bool) and cpi > 0 else None
+
+    def _update_combs(self, detections, delays, dopplers, snrs):
+        """Read each confirmed track's rotor lines out of the frame it was just updated by.
+
+        A turning rotor or propeller shows up as extra detections at the body's
+        delay, spaced in Doppler (services.comb_features).  The body is the
+        detection the tracker just assigned to the track, so there is no
+        matching to do here; what the tracker did decide is which detections
+        are *other* aircraft's, and those are withheld from this track's comb:
+        a second aircraft at nearly the same delay would otherwise read as a
+        rotor line.  A detection that merely started a new tentative track was
+        assigned to nothing and stays a candidate, since a rotor line is just
+        what the tracker would start one on.
+
+        Only tracks that earned an id are read.  A track whose newest
+        measurement is older than this frame is skipped: its comb is last
+        frame's, not this one's.
+        """
+        n = len(detections)
+        if not n:
+            return
+        tracker = self.tracker
+        frame_no = tracker.frame_count
+        index_of = {id(d): i for i, d in enumerate(detections)}
+        body_of = {}
+        taken = {}
+        for track in tracker.tracks:
+            hist = track.history
+            if hist["frames"][-1] != frame_no:
+                continue
+            meas = hist["measurements"][-1]
+            i = index_of.get(id(meas)) if meas is not None else None
+            if i is None:
+                continue
+            if track.n_associated:
+                taken[i] = track
+            if track.id:
+                body_of[track.id] = i
+        if not body_of:
+            return
+        d_arr = np.asarray(delays[:n], dtype=float)
+        f_arr = np.asarray(dopplers[:n], dtype=float)
+        s_arr = np.asarray(snrs[:n], dtype=float)
+        order = np.argsort(d_arr)
+        d_sorted = d_arr[order]
+        bin_hz = self._bin_hz()
+        extra = {} if bin_hz is None else {"bin_hz": bin_hz}
+        tol = COMB_DELAY_TOL_US
+        ids = list(body_of)
+        body_idx = np.fromiter((body_of[t] for t in ids), dtype=np.intp, count=len(ids))
+        # One pass for every body's neighbourhood: how many detections sit within
+        # the delay tolerance, the body itself included.
+        lows = np.searchsorted(d_sorted, d_arr[body_idx] - tol, side="left")
+        highs = np.searchsorted(d_sorted, d_arr[body_idx] + tol, side="right")
+        for track_id, i, lo, hi in zip(ids, body_idx.tolist(), lows.tolist(), highs.tolist()):
+            acc = self._combs.get(track_id)
+            if acc is None:
+                acc = self._combs[track_id] = CombAccumulator(max_frames=COMB_HISTORY_FRAMES)
+            geo = self.geolocated_tracks.get(track_id)
+            if geo is not None:
+                geo.comb_source = acc
+            if hi - lo < 2:
+                # Nothing but the body at this delay: no frame_comb call, which
+                # is nearly every confirmed track on nearly every frame.
+                acc.add(NO_COMB, s_arr[i])
+                continue
+            near = [j for j in order[lo:hi].tolist() if j == i or j not in taken]
+            if len(near) < 2:
+                acc.add(NO_COMB, s_arr[i])
+                continue
+            acc.add(frame_comb(d_arr[near], f_arr[near], s_arr[near], d_arr[i], f_arr[i], tol, **extra), s_arr[i])
+
+    def _safe_update_combs(self, detections, delays, dopplers, snrs):
+        """_update_combs, which can never cost the frame: comb features are enrichment."""
+        try:
+            self._update_combs(detections, delays, dopplers, snrs)
+        except Exception:
+            from core import state as _state  # deferred to avoid circular import at module level
+
+            _state.bump_counter("comb_feature_errors")
+            logger.debug("comb features failed for node %s", self.node_id, exc_info=True)
+
     def process_frame(self, frame: dict):
         """Process a single detection frame {timestamp, delay[], doppler[], snr[], adsb?[]}."""
         ts = frame["timestamp"]
@@ -809,6 +919,10 @@ class PassiveRadarPipeline:
 
         # Run geolocation on updated track events
         self._run_geolocation()
+
+        # After geolocation, so a track the solver just replaced is the one the
+        # comb is attached to.
+        self._safe_update_combs(detections, delays, dopplers, snrs)
 
         # Periodically prune stale track entries from per-track dicts
         self._frame_count += 1

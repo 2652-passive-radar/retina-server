@@ -164,6 +164,10 @@ ALLOWED_DIVERGENCE = (
     # known lane at its binding default: its fleet already relays that traffic
     # and polls the service from the same address. See docker-compose.prod.yml.
     ("test", r"^services\.server\.environment\.(ADSB_FALLBACK_ENABLED|KNOWN_LANE_MODE)$"),
+    # The test droplet alone leaves the aircraft registry off: its fleet's hexes
+    # are random and are never looked up (services/target_classification.py), so
+    # the download would label nothing there. See docker-compose.prod.yml.
+    ("test", r"^services\.server\.environment\.AIRCRAFT_DB_ENABLED$"),
     # Compose records the file list it was assembled from.
     r"^name$",
     r"^services\.[^.]+\.(build|image)\.?.*labels.*$",

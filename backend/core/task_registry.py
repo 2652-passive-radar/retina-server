@@ -36,6 +36,7 @@ TASK_EXPECTED_INTERVAL_S: dict[str, int] = {
     "adsb_fallback": 60,
     "solver": 120,
     "storage_refresh": 720,  # expected every 300 s; alert if >2× late
+    "classification_archive_flush": 3600,  # hourly; alert if >2× late
     "track_archive_flush": 180,  # flush every 60 s; alert if >3× late
     "users_db_backup": 86400 * 2,  # daily; alert if it hasn't run in 2 days
 }

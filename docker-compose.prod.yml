@@ -76,6 +76,13 @@ services:
       # its fleet already relays that traffic (ClickUp 123zgec4kbh).
       - ADSB_FALLBACK_ENABLED=1
       - KNOWN_LANE_MODE=shadow
+      # Downloads the aircraft registry the feed labels targets from by ICAO hex
+      # (services/aircraft_db.py). Real nodes report here, so without it real
+      # traffic carries no hex label: the classification scorecard stays empty
+      # and the classification archive writes rows with nothing to learn from.
+      # Staging has run it since the labels landed and the test droplet leaves it
+      # off, since a synthetic fleet's hexes are never looked up.
+      - AIRCRAFT_DB_ENABLED=1
     deploy:
       resources:
         limits:

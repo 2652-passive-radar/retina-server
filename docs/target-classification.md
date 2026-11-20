@@ -148,3 +148,57 @@ last 6 h with one vote per transponder (its latest pair):
 - whether the registry is loaded, and how old it is.
 
 That number is the one a learned classifier has to beat.
+
+## 4. Real data: from a node's detections to a dataset
+
+Nothing here needs a code change once a node streams detections. The flow:
+
+1. **Node frames** arrive with parallel `delay`, `doppler` and `snr` arrays and
+   go through `PassiveRadarPipeline.process_frame`, like simulated ones.
+2. **Tracker:** builds tracks per node; multinode solves where nodes overlap.
+3. **Comb features:** after each frame, every track whose newest detection came
+   from that frame is checked for extra detections at its delay
+   (`services/comb_features.py`). The tracker's own association picks the body
+   line. Detections it gave other tracks are excluded. The summary rides on the
+   feed entry as `comb`.
+4. **Motion classifier + hex label:** `classify_feed` annotates every feed
+   entry with `motion_class` and, where a transponder names it, `identity`.
+5. **Archive:** `services/classification_archive.py` folds each target into
+   60 s windows and writes them hourly to Parquet at
+   `backend/data/classification_archive/YYYY/MM/DD/HH.parquet`. That is the
+   `backend-data` volume, `/app/backend/data` inside the container.
+6. **Report / export:** `scripts/classification_report.py` prints the
+   scorecard, comb tables and jet-vs-turboprop table, and `--export` writes a
+   training set with a `group` column (the hex) for splitting by aircraft.
+
+Environment:
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `AIRCRAFT_DB_ENABLED` | off (on in staging and production compose) | Downloads the registry. Without it real traffic gets no hex label |
+| `CLASSIFICATION_ARCHIVE_ENABLED` | on unless exactly `0` | Writes the archive |
+
+Running the report on the server:
+
+```bash
+docker compose exec backend python scripts/classification_report.py \
+  data/classification_archive --world real --label-source hex \
+  --export data/classification-real.parquet
+```
+
+`GET /api/admin/classification/scorecard` also shows the archive's buffered
+and written row counts and its last flush.
+
+What a node needs before its data is useful:
+
+- **ADS-B enabled.** Detections carry a hex only when the node's ADS-B truth
+  source is on. Without it the node's targets are classified but unlabelled.
+- **A Doppler window of about ±1000 Hz** at ~500 MHz. At that carrier an
+  airliner's Doppler and a rotor's comb both reach several hundred Hz, and a
+  ±300 Hz window clips them.
+- **Overlap with other nodes,** for multinode tracks. A lone node mostly
+  yields the single-node Doppler speed floor, which is why the baseline answers
+  `unknown` for most windows.
+
+Known issue: in simulation, rotor comb lines produce spurious confirmed tracks.
+See `docs/design-notes/2026-11-17-comb-lines-vs-tracker.md`.

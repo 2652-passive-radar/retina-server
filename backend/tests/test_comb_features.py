@@ -176,3 +176,39 @@ def test_spacing_recovered_from_a_simulated_turboprop(monkeypatch):
     summary = acc.summary()
     assert summary["frac_frames_with_comb"] > 0.5
     assert summary["median_spacing_hz"] == pytest.approx(102.0, rel=0.06)
+
+
+class TestLiveAccumulation:
+    def test_max_frames_keeps_the_newest(self):
+        acc = CombAccumulator(max_frames=3)
+        for n in range(5):
+            acc.add(_frame(_comb(100.0, range(1, n + 1))), body_snr_db=20.0 + n)
+        s = acc.summary()
+        assert s["frames"] == 3
+        assert s["max_n_lines"] == 4
+        assert s["median_body_snr_db"] == 23.0
+
+    def test_body_snr_is_none_without_any(self):
+        acc = CombAccumulator()
+        acc.add(_frame([]))
+        assert acc.summary()["median_body_snr_db"] is None
+
+    def test_the_compact_summary_is_the_four_headline_numbers(self):
+        from services.comb_features import compact_summary
+
+        acc = CombAccumulator()
+        for _ in range(4):
+            acc.add(_frame(_comb(100.0, [-1, 1, 2])))
+        acc.add(_frame([]))
+        assert compact_summary(acc.summary()) == {
+            "n_lines": 3.0,
+            "spacing_hz": pytest.approx(100.0, abs=3.0),
+            "frac_frames_with_comb": 0.8,
+            "frames": 5,
+        }
+
+    def test_no_frames_has_no_compact_summary(self):
+        from services.comb_features import compact_summary
+
+        assert compact_summary(CombAccumulator().summary()) is None
+        assert compact_summary(None) is None

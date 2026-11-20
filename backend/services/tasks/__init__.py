@@ -12,6 +12,7 @@ from services.tasks.adsb_fallback import adsb_fallback_task
 from services.tasks.aircraft_db_refresh import aircraft_db_refresh_task
 from services.tasks.aircraft_flush import aircraft_flush_task
 from services.tasks.analytics_refresh import analytics_refresh_task, coverage_constraints_task
+from services.tasks.classification_archive import classification_archive_flush_task
 from services.tasks.feed_gc import feed_gc_task
 from services.tasks.frame_loop import frame_processor_loop
 from services.tasks.health_monitor import health_monitor_task
@@ -51,5 +52,6 @@ __all__ = [
     "adsb_fallback_task",
     "aircraft_db_refresh_task",
     "track_flush_task",
+    "classification_archive_flush_task",
     "users_backup_task",
 ]

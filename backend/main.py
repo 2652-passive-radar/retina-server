@@ -73,6 +73,7 @@ from services.tasks import (
     analytics_refresh_task,
     archive_flush_task,
     archive_lifecycle_task,
+    classification_archive_flush_task,
     coverage_constraints_task,
     feed_gc_task,
     frame_processor_loop,
@@ -265,6 +266,8 @@ async def lifespan(app: FastAPI):
                 feed_gc_task,
                 archive_flush_task,
                 track_flush_task,
+                # A no-op flush where CLASSIFICATION_ARCHIVE_ENABLED=0.
+                classification_archive_flush_task,
                 archive_lifecycle_task,
                 users_backup_task,
                 analytics_refresh_task,
@@ -326,6 +329,13 @@ async def lifespan(app: FastAPI):
                         pass
                 except Exception:
                     logging.exception("Final track archive flush failed; batch remains pending")
+                try:
+                    from services import classification_archive
+
+                    classification_archive.close_all()
+                    classification_archive.flush()
+                except Exception:
+                    logging.exception("Final classification archive flush failed")
 
             from clients import digitalocean
             from services.tasks.periodic import close_http_clients
