@@ -16,7 +16,7 @@ from config.constants import (
     N2_TRACK_ASSOCIATION,
 )
 from core import state
-from services import dark_follow, track_filter
+from services import dark_follow, receiver_motion, track_filter
 
 # Beam-coverage geometry, used to reject solver results whose range or (at
 # n=2) bearing fall outside a contributing node's detection area.  This
@@ -1232,6 +1232,13 @@ def _resolve_cv_fit(s_in: dict, node_cfgs, *, fix_altitude: bool = False) -> dic
     epochs = s_in.get("cv_epochs")
     if not epochs or not isinstance(node_cfgs, dict):
         return None
+    if any(receiver_motion.is_moving(nid) for nid in node_cfgs):
+        # The fit holds every receiver still for the whole window (one config
+        # per node, no receiver Doppler), so on a moving receiver it would
+        # report the receiver's own motion as misfit.  Unfitted is what the n=2
+        # gate already treats as unconfirmed.
+        state.bump_counter("cv_fit_skipped_moving_rx")
+        return None
     try:
         from retina_geolocator.multinode_solver import fit_constant_velocity
 
@@ -1513,6 +1520,10 @@ def _process_solver_item(
     _solve_best_altitude.
     """
     s_in, node_cfgs = item[0], item[1]
+    # A moving receiver is placed where it was at this input's epoch, so the
+    # beam and range gates below judge the solve from there.  The pool
+    # wrappers apply it again after epoch alignment, which can move the epoch.
+    node_cfgs = receiver_motion.apply(s_in, node_cfgs)
     enqueued_at: float | None = item[2] if len(item) > 2 else None
     # Discard items that have been waiting too long in the queue.  By the time
     # they are solved, the result's timestamp_ms will be > 60 s old and the

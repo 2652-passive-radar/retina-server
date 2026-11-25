@@ -353,6 +353,10 @@ class TestConsensusAndCounters:
         state.dark_bottomup_shadowed = 18
         state.tracks_stale_skipped = 13
         state.solver_epoch_align_skipped = 14
+        state.rx_motion_rejected = 31
+        state.rx_motion_applied = 32
+        state.rx_motion_stale = 33
+        state.cv_fit_skipped_moving_rx = 34
         state.solver_resolve_skips_dark = 9
         state.solver_resolve_refresh = 3
         state.node_frames_rate_limited = 13
@@ -374,6 +378,10 @@ class TestConsensusAndCounters:
             "resolve_skips": 12,
             "tracks_stale_skipped": 13,
             "epoch_align_skipped": 14,
+            "rx_motion_rejected": 31,
+            "rx_motion_applied": 32,
+            "rx_motion_stale": 33,
+            "cv_fit_skipped_moving_rx": 34,
             "resolve_skips_dark": 9,
             "resolve_refresh": 3,
             "adopt_eligible": 21,

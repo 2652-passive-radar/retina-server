@@ -873,6 +873,15 @@ def _counters(snap: SimpleNamespace) -> dict:
         "resolve_skips": state.solver_resolve_skips,
         "tracks_stale_skipped": state.tracks_stale_skipped,
         "epoch_align_skipped": state.solver_epoch_align_skipped,
+        # Moving receivers (services.receiver_motion): unusable rx_motion
+        # poses refused on ingest, moving nodes placed at their pose for a
+        # solve, moving nodes left out for lack of a recent pose, and n=2
+        # inputs left unconfirmed because the constant-velocity fit cannot
+        # model a moving receiver.
+        "rx_motion_rejected": state.rx_motion_rejected,
+        "rx_motion_applied": state.rx_motion_applied,
+        "rx_motion_stale": state.rx_motion_stale,
+        "cv_fit_skipped_moving_rx": state.cv_fit_skipped_moving_rx,
         # Dark share of the line above.  The windowed version, with the
         # blocking claims, is the "resolve_skips" block further up.
         "resolve_skips_dark": state.solver_resolve_skips_dark,

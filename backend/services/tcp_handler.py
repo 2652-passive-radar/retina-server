@@ -15,7 +15,7 @@ from retina_custody.hash_chain import HashChainEntry, HashChainVerifier
 
 from config.constants import CHAIN_ENTRIES_MAX_PER_NODE, IQ_COMMITMENTS_MAX_PER_NODE
 from core import state
-from services import node_registration
+from services import node_registration, receiver_motion
 from services.feed_helpers import adsb_capture_ts_ms, adsb_store
 from services.geo import valid_latlon
 from services.id_utils import normalize_hex_key
@@ -483,6 +483,9 @@ def _enqueue_detection(msg: dict, node_id: str | None):
         return
     if node_id:
         frame["_node_id"] = node_id
+        # A moving receiver's pose, filed before the rate limit below so a frame
+        # kept out of the heavy pipeline still tells the solver where it was.
+        receiver_motion.record(node_id, frame)
 
     # ALWAYS extract ADS-B positions immediately, even before queuing.
     # This keeps state.adsb_aircraft fresh regardless of queue depth.

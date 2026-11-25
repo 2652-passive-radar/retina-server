@@ -13,6 +13,7 @@ import threading
 from concurrent.futures.process import BrokenProcessPool
 
 from core import state
+from services import receiver_motion
 
 _N_SOLVER_WORKERS = int(os.getenv("SOLVER_WORKERS", "2"))
 
@@ -143,6 +144,7 @@ def _pool_solve_multinode(s_in, node_cfgs):
     """solve_multinode via the process pool (inline when no pool exists)."""
     from retina_geolocator.multinode_solver import solve_multinode
 
+    node_cfgs = receiver_motion.apply(s_in, node_cfgs)
     return _pool_call(solve_multinode, s_in, node_cfgs)
 
 
@@ -156,6 +158,7 @@ def _pool_solve_multistart(s_in, node_cfgs, alt_starts_km):
     """
     from retina_geolocator.multinode_solver import solve_multinode_multistart
 
+    node_cfgs = receiver_motion.apply(s_in, node_cfgs)
     return _pool_call(solve_multinode_multistart, s_in, node_cfgs, alt_starts_km, True)
 
 
@@ -163,6 +166,7 @@ def _pool_select_consensus(s_in, node_cfgs):
     """select_consensus via the process pool (inline when no pool exists)."""
     from retina_geolocator.consensus import select_consensus
 
+    node_cfgs = receiver_motion.apply(s_in, node_cfgs)
     return _pool_call(select_consensus, s_in, node_cfgs)
 
 

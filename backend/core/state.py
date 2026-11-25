@@ -906,6 +906,14 @@ tracks_stale_skipped: int = 0
 # SOLVER_EPOCH_ALIGN is on; a nonzero value against solver_successes says how
 # much of the fleet is still emitting untimed measurements.
 solver_epoch_align_skipped: int = 0
+# Moving receivers (services.receiver_motion): a frame's rx_motion that was not
+# a usable pose; a moving node's pose placed into a solve's configs; a moving
+# node left out of a solve for having no pose near its epoch; and n=2 inputs
+# whose constant-velocity fit was skipped because a receiver was moving.
+rx_motion_rejected: int = 0
+rx_motion_applied: int = 0
+rx_motion_stale: int = 0
+cv_fit_skipped_moving_rx: int = 0
 
 solver_queue_drops: int = 0
 # When the solver queue last refused a candidate (time.time(), 0.0 = never),
